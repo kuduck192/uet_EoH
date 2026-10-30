@@ -14,7 +14,7 @@ logger = logging.getLogger('eoh')
 
 
 class InterfaceLLM:
-    def __init__(self, api_endpoint, api_key, model, use_local, local_url, timeout=60):
+    def __init__(self, api_endpoint, api_key, model, use_local, local_url, timeout=60, extra_body=None):
         if use_local:
             if not local_url:
                 raise ValueError("local_url must be set when use_local=True")
@@ -23,7 +23,7 @@ class InterfaceLLM:
         else:
             if not api_key or not api_endpoint:
                 raise ValueError("api_endpoint and api_key must be set for remote LLM")
-            self.llm = InterfaceAPI(api_endpoint, api_key, model, timeout=timeout)
+            self.llm = InterfaceAPI(api_endpoint, api_key, model, timeout=timeout, extra_body=extra_body)
             logger.info("LLM: %s @ %s", model, api_endpoint)
 
         if self.llm.get_response("1+1=?") is None:

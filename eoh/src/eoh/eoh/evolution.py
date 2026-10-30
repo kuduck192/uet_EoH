@@ -149,6 +149,7 @@ class Evolution:
             config.llm.use_local,
             config.llm.local_url,
             timeout=config.llm.timeout,
+            extra_body=config.llm.extra_body,
         )
 
     # ── prompt builders ───────────────────────────────────────────────────────
@@ -363,7 +364,7 @@ class Evolution:
         n_retry = 0
         while self._is_duplicate(population, code) and n_retry < 2:
             logger.debug("  [offspring] duplicate — retrying...")
-            _, code, algorithm = self._generate(population, operator)
+            parents, code, algorithm = self._generate(population, operator)
             if code is None:
                 return None, None, None
             n_retry += 1

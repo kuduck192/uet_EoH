@@ -6,3 +6,11 @@
 .DS_Store
 .vscode/
 output.log
+# nn_optimizer example: datasets, run outputs, device-specific caches
+examples/nn_optimizer/data/
+examples/nn_optimizer/runs/
+examples/nn_optimizer/ref_cache.json
+examples/nn_optimizer/baselines_*.json
+examples/nn_optimizer/analysis_out/
+# NFS placeholders of files deleted while still open
+.nfs*

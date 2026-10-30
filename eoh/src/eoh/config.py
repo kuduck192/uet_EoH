@@ -17,6 +17,9 @@ class LLMConfig:
     use_local: bool = False
     local_url: str = None
     timeout: int = 180
+    # Extra fields merged into the chat-completions request body, e.g.
+    # {"temperature": 0.8, "chat_template_kwargs": {"enable_thinking": False}}.
+    extra_body: dict = None
 
 
 @dataclass

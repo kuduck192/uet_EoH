@@ -5,6 +5,7 @@
 #           Using Large Language Model, Forty-first International Conference on Machine Learning
 #           (ICML), 2024.
 
+import hashlib
 import heapq
 import json
 import os
@@ -32,6 +33,19 @@ def _normalize_fitness(fitness):
         logger.debug("  [eval] non-finite fitness (%s) discarded", fitness)
         return None
     return rounded
+
+
+def code_id(code):
+    """Short stable id of a program, used to link samples to their parents."""
+    return hashlib.sha1(code.encode('utf-8')).hexdigest()[:12] if code else None
+
+
+def _parent_ids(parents):
+    if parents is None:
+        return []
+    if isinstance(parents, dict):
+        parents = [parents]
+    return [code_id(p.get('code')) for p in parents]
 
 
 def population_management(pop, size):
@@ -146,6 +160,9 @@ class EOH:
             'algorithm': offspring.get('algorithm') if offspring else None,
             'code': offspring.get('code') if offspring else None,
             'objective': offspring.get('objective') if offspring else None,
+            'code_id': code_id(offspring.get('code')) if offspring else None,
+            'parents': offspring.get('parents', []) if offspring else [],
+            'time': time.time(),
         }
         self._samples_buffer.append(record)
         if len(self._samples_buffer) >= self._SAMPLE_BATCH:
@@ -232,6 +249,7 @@ class EOH:
             'code': code,
             'objective': _normalize_fitness(fitness),
             'other_inf': None,
+            'parents': _parent_ids(_parents),
         }
 
     def _select_operator(self):
