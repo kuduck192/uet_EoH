@@ -89,9 +89,13 @@ def main():
     w = 3 if args.metric == "val" else 20  # smoothing window, in curve points
     new_rules = resolve_rules(args.rules)
     previous = []
+    table_tasks = list(tasks)
     if args.merge_into:
         with open(args.merge_into) as f:
             old = json.load(f)
+        # keep the old columns (a merge may run the new rules on a subset of the tasks)
+        table_tasks = list(next(iter(old["table"].values())).keys())
+        table_tasks += [t for t in tasks if t not in table_tasks]
         new_names = {r["name"] for r in new_rules}
         previous = [r for r in old["raw"] if r["rule"] not in new_names]
         names = [n for n in old["table"] if n not in new_names] + [r["name"] for r in new_rules]
@@ -112,7 +116,10 @@ def main():
     table = {}
     for r in rules:
         row = {}
-        for t in tasks:
+        for t in table_tasks:
+            if (r["name"], t) not in by:
+                row[t] = dict(error="not run")
+                continue
             res, ref = by[(r["name"], t)], by[("adam_ref", t)]
             if "error" in res or "error" in ref:
                 row[t] = dict(error=res.get("error") or ref.get("error"))
@@ -128,14 +135,14 @@ def main():
                           speedup=float(adam_steps / rule_steps) if np.isfinite(rule_steps) else None)
         table[r["name"]] = row
 
-    header = f"{'rule':<16}" + "".join(f"{t[:22]:>26}" for t in tasks)
+    header = f"{'rule':<16}" + "".join(f"{t[:22]:>26}" for t in table_tasks)
     print(header)
     for name, row in table.items():
         cells = []
-        for t in tasks:
+        for t in table_tasks:
             c = row[t]
             if "error" in c:
-                cells.append(f"{'error':>26}")
+                cells.append(f"{c['error'] if c['error'] == 'not run' else 'error':>26}")
             else:
                 sp = f"x{c['speedup']:<5.2f}" if c["speedup"] is not None else "x  -  "
                 cells.append(f"{c['rel_mean']:>+9.3f}±{c['rel_std']:.3f} {sp}    ")

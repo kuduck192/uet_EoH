@@ -3,6 +3,7 @@
 Rule specs accepted on every command line:
     baseline:<name>      a hand-designed rule from baselines.py (e.g. baseline:adam)
     run:<run>[:<k>]      the k best rules of the latest population of runs/<run> (default k=1)
+    evolved:<run>[:<k>]  the same, skipping seed rules (seeded runs)
     sample:<run>:<n>     sample number n of runs/<run> (named <run>@<n>)
     file:<path>          a Python file defining UpdateRule
 """
@@ -113,6 +114,13 @@ def resolve_rules(specs):
             run, _, k = rest.partition(":")
             for i, ind in enumerate(latest_population(run)[: int(k or 1)]):
                 rules.append(dict(name=f"{os.path.basename(run)}#{i + 1}", code=ind["code"],
+                                  algorithm=ind.get("algorithm"), objective=ind["objective"]))
+        elif kind == "evolved":  # like run:, but skipping seeds (names keep the population rank)
+            run, _, k = rest.partition(":")
+            seeds = {s["code"] for s in load_seeds(run)}
+            ranked = [(i, ind) for i, ind in enumerate(latest_population(run), start=1) if ind["code"] not in seeds]
+            for i, ind in ranked[: int(k or 1)]:
+                rules.append(dict(name=f"{os.path.basename(run)}#{i}", code=ind["code"],
                                   algorithm=ind.get("algorithm"), objective=ind["objective"]))
         elif kind == "sample":
             run, _, n = rest.partition(":")

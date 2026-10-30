@@ -6,7 +6,18 @@
 
 ## Tóm tắt
 
-<!-- SUMMARY -->
+- **Bài toán.** Dùng EoH với Qwen3.8-27B chạy local để tiến hóa update rule của optimizer cho mạng nơ-ron, rồi đọc kết quả qua hai lăng kính: best practices của optimizer deep learning và natural gradient (NGD). Có bốn run. R1–R3 là blind: template SGD, không seed, không nhắc tới Fisher hay NGD. R4 có seed: Shampoo, Muon và rule tốt nhất của R3.
+- **RQ1 — EoH tái phát hiện phần lớn best practice "rẻ".** Gồm momentum, Nesterov, Adam, bias correction, giảm lr theo thời gian, và cosine theo $t/T$ ngay khi được cho T. Rule blind tốt nhất có loss (trung bình hình học dọc quỹ đạo) thấp hơn Adam đã tune 9–13%, và thắng AdamW + warmup + cosine trên cả 4 task của R3. EoH *không* tìm ra weight decay, có thử nhưng loại warmup, và **không tự tìm ra preconditioning ma trận**: chỉ 5/331 mẫu R3 có phép toán ma trận, và đều thua Adam.
+- **RQ2 — hàm fitness quyết định loại rule.** Fitness trung bình (R1) sinh ra một chuyên gia cho softmax thẳng trục: nhanh hơn Adam ×3.5 ở đó, nhưng thua Adam trên Transformer và trên ResNet-18 held-out. Fitness robust (R2) cho rule cân bằng hơn, thắng Adam trên ResNet-18 held-out (×1.17–1.28). Khi đa dạng được giữ (R2), search lâu hơn có ích; khi không (R1), search bão hòa sau khoảng 700 mẫu.
+- **RQ3 — EoH hai lần tự đi về phía NGD.** Cả hai lần đều là "nâng số mũ" của preconditioner từ căn bậc hai lên bậc một:
+  - R1 đi từ Adam ($m/\sqrt v$) sang $m/v$, có $k=+1$, tức bất biến với scale đường chéo như diag-NGD;
+  - R4 đi từ Shampoo ($\approx F^{-1/2}$) sang Shampoo² ($\approx F^{-1}$, NGD Kronecker), đạt fitness −0.302 so với −0.180 của Shampoo.
+
+  Rule đường chéo không vượt được trần của xấp xỉ đường chéo: cosine với full NGD ngang Adam, rotation penalty +0.8 đến +1.6 (họ R1 best còn lớn hơn cả diag-NGD, +0.98). Preconditioner Kronecker thì không bị trần đó. Trên softmax đã xoay, Shampoo² của R4 căn với hướng full NGD ngang chính rule NGD (cos 0.56 so với 0.55; Shampoo 0.39, Adam 0.25), gần như không bị phạt khi xoay (+0.07, so với +0.73 của Adam), và hội tụ nhanh ngang full NGD (log-AUC −1.13 so với −1.16).
+- **Hai bài học về EoH.**
+  1. Thought của LLM không đáng tin: 33% mẫu R3 tự nhận là "second-order", nhưng code của chúng là rule đường chéo.
+  2. Ý tưởng bậc hai là bài toán đánh lừa. Viết lại từ đầu thì fail; sửa nhỏ trên một bản Shampoo đã chạy tốt thì thắng lớn. Muốn EoH tự tìm ra, cần cơ chế giữ đa dạng theo ý tưởng và phản hồi lỗi cho LLM.
+- **Hạn chế chính.** Mỗi cấu hình chỉ có 1 run; task nhỏ, horizon ngắn; speedup tính theo số bước, trong khi rule tốt nhất của R4 tốn hơn Adam nhiều lần mỗi bước (mục 9).
 
 ## 1. Bối cảnh và câu hỏi nghiên cứu
 
@@ -154,14 +165,14 @@ Task description của R3/R4 ghi "T từ 200 đến 600 bước"; đó là horiz
 | Initial population | 20 i1 samples from the SGD-momentum template | 32 i1 samples from the SGD-momentum template | 32 i1 samples from the SGD-momentum template | seeds: Shampoo + cosine -0.179, Muon + cosine -0.124, R3 best -0.094, R3 #6 (dual momentum) -0.093, R3 best, polished -0.103 |
 | Population management | pop 10, EoH default | pop 16, max 2 per code skeleton | pop 16, max 2 per code skeleton | pop 16, max 2 per code skeleton |
 | LLM | `qwen3.8-27b`, thinking off, T=0.7, top-p=0.8 | `qwen3.8-27b`, thinking off, T=0.7, top-p=0.8 | `qwen3.8-27b`, thinking off, T=0.7, top-p=0.8 | `qwen3.8-27b`, thinking off, T=0.7, top-p=0.8 |
-| Samples (valid) | 1020 (979, 96%) | 1032 (695, 67%) | 432 (331, 77%) | 80 (68, 85%) |
-| Per operator (valid/total) | e1 226/234, e2 200/209, i1 19/20, m1 213/220, m2 227/228, m3 94/109 | e1 141/227, e2 152/220, i1 29/32, m1 147/218, m2 154/230, m3 72/105 | e1 52/90, e2 56/81, i1 19/32, m1 75/89, m2 87/97, m3 42/43 | e1 15/21, e2 15/18, m1 15/17, m2 16/16, m3 7/8 |
-| Best by own fitness | -0.1444 (#705, m2) | -0.1237 (#844, m1) | -0.0953 (#265, m2) | -0.1963 (#71, m2) |
-| Best in final population | -0.1444 (evolved) | -0.1237 (evolved) | -0.0953 (evolved) | -0.1963 (evolved) |
-| Best robust fitness | -0.1317 (#402) | -0.1237 (#844) | -0.0953 (#265) | -0.1963 (#71) |
-| Beat Adam on all 4 tasks | 46 | 131 | 106 | 26 |
+| Samples (valid) | 1020 (979, 96%) | 1032 (695, 67%) | 432 (331, 77%) | 250 (207, 83%) |
+| Per operator (valid/total) | e1 226/234, e2 200/209, i1 19/20, m1 213/220, m2 227/228, m3 94/109 | e1 141/227, e2 152/220, i1 29/32, m1 147/218, m2 154/230, m3 72/105 | e1 52/90, e2 56/81, i1 19/32, m1 75/89, m2 87/97, m3 42/43 | e1 40/58, e2 29/44, m1 51/57, m2 60/62, m3 27/29 |
+| Best by own fitness | -0.1444 (#705, m2) | -0.1237 (#844, m1) | -0.0953 (#265, m2) | -0.3022 (#225, e2) |
+| Best in final population | -0.1444 (evolved) | -0.1237 (evolved) | -0.0953 (evolved) | -0.3022 (evolved) |
+| Best robust fitness | -0.1317 (#402) | -0.1237 (#844) | -0.0953 (#265) | -0.3022 (#225) |
+| Beat Adam on all 4 tasks | 46 | 131 | 106 | 81 |
 | Distinct skeletons in final population | 8/10 | 11/16 | 11/16 | 13/16 |
-| Wall-clock | 55 min | 89 min | 102 min | 16 min |
+| Wall-clock | 55 min | 89 min | 102 min | 80 min |
 <!-- END:eoh_summary -->
 
 R2 chỉ có 67% mẫu hợp lệ (R1 có 96%) vì một sự cố: khoảng 290 mẫu bị fail oan khi `prob.py` được sửa trong lúc R2 đang chạy. Mỗi evaluation chạy trong một tiến trình mới, nạp code mới nhưng dùng object problem đã pickle từ code cũ. Các mẫu còn lại không bị ảnh hưởng.
@@ -1111,12 +1122,48 @@ class UpdateRule:
 
 ### 4.4 R4: có seed (Shampoo, Muon, rule tốt nhất của R3)
 
-<!-- R4_SEARCH -->
+- **Kết quả.** 81 phút, 250 mẫu (83% hợp lệ), best **−0.302** (#225), so với −0.180 của seed Shampoo và −0.095 của R3 (blind). Rule tốt nhất là **Shampoo với số mũ −1/2 mỗi phía** ("Shampoo²"): $L^{-1/2}\,M\,R^{-1/2}$ thay vì $L^{-1/4}\,M\,R^{-1/4}$, damping lớn hơn (1e-4 thay vì 1e-6), tính lại preconditioner mỗi 5 bước, không giới hạn kích thước ma trận; độ lớn bước vẫn lấy từ Adam (grafting) và vẫn có warmup + cosine. Trên objective của search nó thắng seed Shampoo ở cả 4 task: −0.72 / −0.13 / −0.32 / −0.04 so với −0.32 / −0.12 / −0.26 / −0.03 (softmax xoay / MLP / CNN / char-Transformer).
+- **Đường đi của các cải tiến:**
+  1. #71, #119 (m2): chỉnh tham số của Shampoo, gồm tính lại preconditioner mỗi 5 bước thay vì 10, thống kê nhớ ngắn hơn ($\beta_1$ 0.85, $\beta_2$ 0.995, EMA của $L,R$ 0.9) và warmup 10%. Fitness −0.180 → −0.198.
+  2. #151 (m1): **đổi số mũ từ −1/4 sang −1/2**. Fitness −0.277; lợi ích dồn vào softmax đã xoay (−0.70 so với −0.32 của Shampoo).
+  3. #225 (e2): Shampoo² với damping 1e-4. Fitness −0.302, thắng Shampoo trên cả 4 task.
+- **Cùng một ý tưởng, hai số phận.** Số mũ −1/2 đã được thử từ mẫu #17 và #33, đều do e1 viết lại từ đầu, và cả hai đều fail khi chấm. Ý tưởng chỉ thành công khi đến dưới dạng một thay đổi nhỏ (m1) trên một bản Shampoo đã chạy tốt. Đây đúng là tình huống "bài toán đánh lừa" của R3 (mục 4.3): ý tưởng bậc hai cần một bản cài đặt tốt mới thể hiện được, và seed cung cấp đúng thứ đó.
+- **Quần thể cuối chỉ còn preconditioner ma trận:** 8 biến thể Shampoo (4 cái đứng đầu đều dùng số mũ −1/2) và 8 biến thể Muon; không còn rule đường chéo nào, và cả 5 seed đều đã bị thay. Tính trên toàn run thì khác: 38% mẫu vẫn là rule đường chéo (hậu duệ của các seed R3) và 42% là biến thể Muon. Biến thể Shampoo chỉ chiếm 13% số mẫu, nhưng cho mọi kết quả tốt nhất.
+- **Nối với NGD.** Theo P4, Shampoo gốc $\approx F^{-1/2}$ ("căn bậc hai" của NGD Kronecker, như Adam với diag-NGD), còn Shampoo² $\approx F^{-1}$, tức NGD Kronecker, gần K-FAC (Morwani et al., 2024). EoH đã tự đi đúng bước đó, và lợi ích lớn nhất rơi vào bài softmax đã xoay, nơi NGD trùng với Newton. Đây là lần thứ hai EoH "nâng số mũ" từ căn bậc hai lên bậc một: lần đầu là R1, từ Adam ($m/\sqrt v$) sang $m/v$ (mục 4.1, 8.1). Mục 8.3 kiểm chứng bằng đo đạc trực tiếp.
 
 <details>
 <summary>Các lần đạt best mới (chỉ tính mẫu do EoH sinh ra, không tính seed)</summary>
 
 <!-- BEGIN:timeline_R4 -->
+- **#2** [e1] fitness +2.1531 
+  > A second-order adaptive optimizer using a diagonal approximation of the inverse Hessian computed via truncated power series of the gradient outer product, combined with Nesterov momentum and a cosine-annealed learning rate schedule, applying distinct update rules for matrices (with eigenvalue-based preconditioning) and vectors (with element-wise adaptive scaling).
+
+- **#3** [e2] fitness +0.1781 -second_moment -sqrt -bias_correction -cosine
+  > A gradient-norm-normalized momentum optimizer with an exponential decay schedule that scales the step size by the inverse of the current gradient norm to maintain constant relative progress across varying loss landscapes, motivated by the adaptive scaling and momentum backbone of the previous algorithms but removing second-moment tracking for simplicity and speed.
+
+- **#4** [m2] fitness -0.0920 +second_moment +sqrt +bias_correction +cosine -tensor_reduction
+  > Nesterov momentum with adaptive step size based on the root of a bias-corrected exponential moving average of squared gradients, using a cosine learning rate schedule that decays to a 5% floor.
+
+- **#5** [m2] fitness -0.0943 
+  > Nesterov momentum preconditioned by the root of a bias-corrected exponential moving average of squared gradients, with a cosine learning rate decay to a 1.0% floor and tuned momentum and variance decay coefficients.
+
+- **#40** [m1] fitness -0.1220 +matrix_ops +tensor_reduction
+  > Adaptive Orthogonalized Momentum with Spectral Scaling and Cosine Schedule: applies Nesterov momentum to the gradient, orthogonalizes the momentum tensor for matrices using Newton-Schulz iterations, scales the update by the spectral norm of the gradient to match Adam's effective step size, and uses a cosine learning rate schedule with warmup for vectors and matrices alike.
+
+- **#50** [m2] fitness -0.1521 
+  > Muon with 3 Newton-Schulz iterations, 0.9 momentum for matrices, 0.9/0.999 Adam for vectors, and a schedule that ramps up linearly for the first 5% of steps then decays via cosine to zero.
+
+- **#71** [m2] fitness -0.1963 +saturation
+  > Shampoo with Kronecker-factored preconditioners using exponential moving averages of gradient outer products, refreshed every 5 steps with adaptive damping, combined with Adam-style normalization for vectors and a cosine learning rate schedule with linear warmup.
+
+- **#119** [m2] fitness -0.1979 
+  > Shampoo with Kronecker-factored preconditioners using inverse fourth roots of EMA gradient covariance matrices, Adam grafting for step normalization, linear warmup, and cosine decay schedule
+
+- **#151** [m1] fitness -0.2769 
+  > Modified Shampoo optimizer using inverse square roots of exponential moving average gradient covariance matrices with adaptive damping, Adam grafting for step normalization, and a linear-warmup cosine-decay learning rate schedule.
+
+- **#225** [e2] fitness -0.3022 
+  > A preconditioned gradient descent method that applies a Kronecker-factored second-moment preconditioner to the momentum term, using a damped inverse square root of the Gram matrices for matrices and standard Adam for vectors, modulated by a linear warmup and cosine decay schedule.
 <!-- END:timeline_R4 -->
 
 </details>
@@ -1125,177 +1172,9 @@ class UpdateRule:
 <summary>Code của 3 rule đứng đầu quần thể cuối</summary>
 
 <!-- BEGIN:top_rules_R4 -->
-**R4#1** — fitness -0.1963
+**R4#1** — fitness -0.3022
 
-> Shampoo with Kronecker-factored preconditioners using exponential moving averages of gradient outer products, refreshed every 5 steps with adaptive damping, combined with Adam-style normalization for vectors and a cosine learning rate schedule with linear warmup.
-
-```python
-import torch
-import math
-
-
-class UpdateRule:
-    """Optimizer for one parameter tensor; the harness builds one instance (with no
-    arguments) and one state for every parameter tensor of the network.
-
-    Tensors keep their natural shapes: weight matrices (out, in), convolution
-    kernels (out, in, kh, kw), embeddings (vocab, dim), biases and normalisation
-    gains (n,).
-    """
-
-    def init_state(self, p: torch.Tensor) -> dict:
-        """Return the initial state of this tensor: tensors and numbers."""
-        st = {"m": torch.zeros_like(p), "v": torch.zeros_like(p)}
-        if p.dim() >= 2:
-            rows, cols = p.shape[0], p[0].numel()
-            for key, n in (("L", rows), ("R", cols)):
-                if n <= 1024:
-                    st[key] = torch.zeros(n, n, device=p.device, dtype=p.dtype)
-                    st["P" + key] = torch.eye(n, device=p.device, dtype=p.dtype)
-        return st
-
-    def step(self, p: torch.Tensor, g: torch.Tensor, state: dict, t: int, T: int, lr: float) -> torch.Tensor:
-        """Return the update of this tensor (same shape as p); the harness applies p += delta.
-
-        Args:
-            p:     current values of this parameter tensor.
-            g:     minibatch gradient of the training loss with respect to p.
-            state: the dict returned by init_state for this tensor; update it in place.
-            t:     step counter, from 1 to T.
-            T:     total number of training steps of this run.
-            lr:    base learning rate, selected per task by the harness with a log-spaced sweep.
-        """
-        m, v = state["m"], state["v"]
-        m.mul_(0.9).add_(g, alpha=0.1)
-        v.mul_(0.999).addcmul_(g, g, value=0.001)
-        
-        # Adam-style normalized gradient
-        adam = (m / (1 - 0.9 ** t)) / ((v / (1 - 0.999 ** t)).sqrt() + 1e-8)
-        
-        # Learning rate schedule: linear warmup for first 5% of steps, then cosine decay
-        warmup_steps = max(1, int(0.05 * T))
-        if t <= warmup_steps:
-            lr_scale = t / warmup_steps
-        else:
-            lr_scale = 0.5 * (1.0 + math.cos(math.pi * (t - warmup_steps) / max(1, T - warmup_steps)))
-        
-        if p.dim() < 2:
-            return -lr * lr_scale * adam
-        
-        G = g.reshape(p.shape[0], -1)
-        D = (m / (1 - 0.9 ** t)).reshape(G.shape)
-        
-        # Update and apply Kronecker-factored preconditioners
-        if "L" in state:
-            state["L"].mul_(0.95).add_(G @ G.T, alpha=0.05)
-            if t % 5 == 1:
-                self._refresh_preconditioner(state, "L")
-            D = state["PL"] @ D
-        
-        if "R" in state:
-            state["R"].mul_(0.95).add_(G.T @ G, alpha=0.05)
-            if t % 5 == 1:
-                self._refresh_preconditioner(state, "R")
-            D = D @ state["PR"]
-        
-        # Normalize the preconditioned gradient to match Adam's step norm
-        D = D * (adam.norm() / D.norm().clamp_min(1e-30))
-        
-        return -lr * lr_scale * D.reshape(p.shape)
-
-    def _refresh_preconditioner(self, state, key):
-        """Recompute the inverse square root of the preconditioner matrix."""
-        A = state[key].double()
-        n = A.shape[0]
-        # Add damping for numerical stability
-        damping = 1e-6 * (A.trace() / n).clamp_min(1e-30)
-        A = A + damping * torch.eye(n, device=A.device, dtype=A.dtype)
-        
-        try:
-            lam, U = torch.linalg.eigh(A)
-            lam = lam.clamp_min(1e-6 * lam.max().clamp_min(1e-30))
-            # Compute A^(-1/4) for Shampoo
-            inv_root = (U * lam.pow(-0.25)) @ U.T
-            state["P" + key] = inv_root.float()
-        except RuntimeError:
-            pass
-```
-
-**R4#2** — fitness -0.1795 *(seed: Shampoo + cosine)*
-
-> Shampoo (Kronecker-factored L^-1/4 M R^-1/4, Adam grafting) with linear warmup and cosine decay.
-
-```python
-import torch
-import math
-
-def schedule(t, T, warmup=0.05):
-    w = max(1, int(warmup * T))
-    if t <= w:
-        return t / w
-    return 0.5 * (1.0 + math.cos(math.pi * (t - w) / max(1, T - w)))
-
-
-def inverse_root(A, k, rel_eps=1e-6):
-    """A^(-1/k) of a symmetric PSD matrix in float64, damped by rel_eps * mean eigenvalue."""
-    A = A.double()
-    n = A.shape[0]
-    A = A + rel_eps * (A.trace() / n).clamp_min(1e-30) * torch.eye(n, device=A.device, dtype=A.dtype)
-    lam, U = torch.linalg.eigh(A)
-    lam = lam.clamp_min(rel_eps * lam.max().clamp_min(1e-30))
-    return ((U * lam.pow(-1.0 / k)) @ U.T).float()
-
-
-def refresh(state, key):
-    """Recompute the inverse root of state[key]; keep the old one if eigh fails."""
-    try:
-        state["P" + key] = inverse_root(state[key], 4)
-    except RuntimeError:
-        pass
-
-
-class UpdateRule:
-    """Shampoo: Kronecker-factored preconditioner L^-1/4 M R^-1/4 from EMAs of G G^T and
-    G^T G (a side larger than 1024 is left unpreconditioned), inverse roots refreshed
-    every 10 steps, step norm grafted from Adam per tensor; Adam for vectors. Linear
-    warmup and cosine decay."""
-
-    def init_state(self, p):
-        st = {"m": torch.zeros_like(p), "v": torch.zeros_like(p)}
-        if p.dim() >= 2:
-            rows, cols = p.shape[0], p[0].numel()
-            for key, n in (("L", rows), ("R", cols)):
-                if n <= 1024:
-                    st[key] = torch.zeros(n, n, device=p.device, dtype=p.dtype)
-                    st["P" + key] = torch.eye(n, device=p.device, dtype=p.dtype)
-        return st
-
-    def step(self, p, g, state, t, T, lr):
-        m, v = state["m"], state["v"]
-        m.mul_(0.9).add_(g, alpha=0.1)
-        v.mul_(0.999).addcmul_(g, g, value=0.001)
-        adam = (m / (1 - 0.9 ** t)) / ((v / (1 - 0.999 ** t)).sqrt() + 1e-8)
-        if p.dim() < 2:
-            return -lr * schedule(t, T) * adam
-        G = g.reshape(p.shape[0], -1)
-        D = (m / (1 - 0.9 ** t)).reshape(G.shape)
-        if "L" in state:
-            state["L"].mul_(0.95).add_(G @ G.T, alpha=0.05)
-            if t % 10 == 1:
-                refresh(state, "L")
-            D = state["PL"] @ D
-        if "R" in state:
-            state["R"].mul_(0.95).add_(G.T @ G, alpha=0.05)
-            if t % 10 == 1:
-                refresh(state, "R")
-            D = D @ state["PR"]
-        D = D * (adam.norm() / D.norm().clamp_min(1e-30))
-        return -lr * schedule(t, T) * D.reshape(p.shape)
-```
-
-**R4#3** — fitness -0.1521
-
-> Muon with 3 Newton-Schulz iterations, 0.9 momentum for matrices, 0.9/0.999 Adam for vectors, and a schedule that ramps up linearly for the first 5% of steps then decays via cosine to zero.
+> A preconditioned gradient descent method that applies a Kronecker-factored second-moment preconditioner to the momentum term, using a damped inverse square root of the Gram matrices for matrices and standard Adam for vectors, modulated by a linear warmup and cosine decay schedule.
 
 ```python
 import torch
@@ -1313,10 +1192,36 @@ class UpdateRule:
 
     def init_state(self, p: torch.Tensor) -> dict:
         """Return the initial state of this tensor: tensors and numbers."""
-        return {
+        state = {
             "m": torch.zeros_like(p),
             "v": torch.zeros_like(p),
         }
+        if p.dim() >= 2:
+            # Store Gram matrices for Kronecker-factored preconditioning
+            # Reshape to (out, -1) for matrix operations
+            out_dim = p.shape[0]
+            in_dim = p[0].numel()
+            state["L"] = torch.zeros(out_dim, out_dim, device=p.device, dtype=p.dtype)
+            state["R"] = torch.zeros(in_dim, in_dim, device=p.device, dtype=p.dtype)
+            # Initialize preconditioners to identity
+            state["PL"] = torch.eye(out_dim, device=p.device, dtype=p.dtype)
+            state["PR"] = torch.eye(in_dim, device=p.device, dtype=p.dtype)
+        return state
+
+    def _inverse_sqrt(self, A, rel_eps=1e-4):
+        """Compute A^(-1/2) for a symmetric PSD matrix with damping."""
+        A = A.double()
+        n = A.shape[0]
+        # Add damping for numerical stability
+        A = A + rel_eps * (A.trace() / n).clamp_min(1e-30) * torch.eye(n, device=A.device, dtype=A.dtype)
+        try:
+            lam, U = torch.linalg.eigh(A)
+            lam = lam.clamp_min(rel_eps * lam.max().clamp_min(1e-30))
+            inv_sqrt = ((U * lam.pow(-0.5)) @ U.T).float()
+            return inv_sqrt
+        except RuntimeError:
+            # Fallback to identity if eigh fails
+            return torch.eye(n, device=A.device, dtype=A.dtype).float()
 
     def step(self, p: torch.Tensor, g: torch.Tensor, state: dict, t: int, T: int, lr: float) -> torch.Tensor:
         """Return the update of this tensor (same shape as p); the harness applies p += delta.
@@ -1324,51 +1229,295 @@ class UpdateRule:
         Args:
             p:     current values of this parameter tensor.
             g:     minibatch gradient of the training loss with respect to p.
-            state: the dict returned by init_state for this tensor; update it in place.
+            state: the dict returned in init_state for this tensor; update it in place.
             t:     step counter, from 1 to T.
             T:     total number of training steps of this run.
             lr:    base learning rate, selected per task by the harness with a log-spaced sweep.
         """
         m = state["m"]
         v = state["v"]
-
-        # Schedule: linear warmup for first 5%, then cosine decay
+        
+        # Schedule: linear warmup then cosine decay
         warmup_steps = max(1, int(0.05 * T))
         if t <= warmup_steps:
             sched = t / warmup_steps
         else:
-            progress = (t - warmup_steps) / max(1, T - warmup_steps)
-            sched = 0.5 * (1.0 + math.cos(math.pi * progress))
-
-        if p.dim() >= 2:
-            # Muon for matrices: orthogonalize Nesterov momentum
-            m.mul_(0.9).add_(g)
-            G = (g + 0.9 * m).reshape(p.shape[0], -1)
-            
-            # Newton-Schulz iterations for polar factor
-            X = G / (G.norm() + 1e-7)
-            tall = X.shape[0] > X.shape[1]
-            if tall:
-                X = X.T
-            a, b, c = 3.4445, -4.7750, 2.0315
-            for _ in range(3):
-                A = X @ X.T
-                X = a * X + (b * A + c * A @ A) @ X
-            if tall:
-                X = X.T
-            
-            # Scale to match RMS of Adam-like updates
-            scale = 0.2 * math.sqrt(max(G.shape))
-            d = X * scale
-            return -lr * sched * d.reshape(p.shape)
-        else:
+            sched = 0.5 * (1.0 + math.cos(math.pi * (t - warmup_steps) / max(1, T - warmup_steps)))
+        
+        # Update momentum and second moment
+        m.mul_(0.9).add_(g, alpha=0.1)
+        v.mul_(0.999).addcmul_(g, g, value=0.001)
+        
+        # Bias correction
+        m_hat = m / (1 - 0.9 ** t)
+        v_hat = v / (1 - 0.999 ** t)
+        
+        if p.dim() < 2:
             # Adam for vectors
-            m.mul_(0.9).add_(g, alpha=0.1)
-            v.mul_(0.999).addcmul_(g, g, value=0.001)
-            bias_correction1 = 1 - 0.9 ** t
-            bias_correction2 = 1 - 0.999 ** t
-            adam = (m / bias_correction1) / ((v / bias_correction2).sqrt() + 1e-8)
-            return -lr * sched * adam
+            update = m_hat / (v_hat.sqrt() + 1e-8)
+            return -lr * sched * update
+        else:
+            # Kronecker-factored preconditioning for matrices
+            G = g.reshape(p.shape[0], -1)
+            D = m_hat.reshape(G.shape)
+            
+            # Update Gram matrices
+            if "L" in state:
+                state["L"].mul_(0.95).add_(G @ G.T, alpha=0.05)
+                # Recompute preconditioner every 5 steps
+                if t % 5 == 1:
+                    state["PL"] = self._inverse_sqrt(state["L"])
+                D = state["PL"] @ D
+            
+            if "R" in state:
+                state["R"].mul_(0.95).add_(G.T @ G, alpha=0.05)
+                # Recompute preconditioner every 5 steps
+                if t % 5 == 1:
+                    state["PR"] = self._inverse_sqrt(state["R"])
+                D = D @ state["PR"]
+            
+            # Normalize to match Adam-like step size
+            adam_norm = (m_hat / (v_hat.sqrt() + 1e-8)).norm()
+            D_norm = D.norm().clamp_min(1e-30)
+            D = D * (adam_norm / D_norm)
+            
+            return -lr * sched * D.reshape(p.shape)
+```
+
+**R4#2** — fitness -0.2769
+
+> Modified Shampoo optimizer using inverse square roots of exponential moving average gradient covariance matrices with adaptive damping, Adam grafting for step normalization, and a linear-warmup cosine-decay learning rate schedule.
+
+```python
+import torch
+import math
+
+
+class UpdateRule:
+    """Optimizer for one parameter tensor; the harness builds one instance (with no
+    arguments) and one state for every parameter tensor of the network.
+
+    Tensors keep their natural shapes: weight matrices (out, in), convolution
+    kernels (out, in, kh, kw), embeddings (vocab, dim), biases and normalisation
+    gains (n,).
+    """
+
+    def init_state(self, p: torch.Tensor) -> dict:
+        """Return the initial state of this tensor: tensors and numbers."""
+        st = {
+            "m": torch.zeros_like(p),
+            "v": torch.zeros_like(p),
+        }
+        if p.dim() >= 2:
+            rows, cols = p.shape[0], p[0].numel()
+            # Store covariance matrices for rows and columns
+            st["L"] = torch.zeros(rows, rows, device=p.device, dtype=p.dtype)
+            st["R"] = torch.zeros(cols, cols, device=p.device, dtype=p.dtype)
+            # Preconditioners (inverse square roots)
+            st["PL"] = torch.eye(rows, device=p.device, dtype=p.dtype)
+            st["PR"] = torch.eye(cols, device=p.device, dtype=p.dtype)
+        return st
+
+    def _inverse_sqrt(self, A: torch.Tensor, rel_eps: float = 1e-6) -> torch.Tensor:
+        """Compute A^(-1/2) for symmetric PSD matrix A in float64."""
+        A = A.double()
+        n = A.shape[0]
+        # Add damping to ensure positive definiteness
+        damping = rel_eps * (A.trace() / n).clamp_min(1e-30)
+        A = A + damping * torch.eye(n, device=A.device, dtype=A.dtype)
+        
+        try:
+            lam, U = torch.linalg.eigh(A)
+            # Clamp eigenvalues to avoid division by zero or negative values
+            lam = lam.clamp_min(rel_eps * lam.max().clamp_min(1e-30))
+            inv_sqrt = (U * lam.pow(-0.5)) @ U.T
+            return inv_sqrt.float()
+        except RuntimeError:
+            # Fallback to identity if eigh fails
+            return torch.eye(n, device=A.device, dtype=A.dtype).float()
+
+    def _refresh_preconditioners(self, state: dict) -> None:
+        """Recompute inverse square roots of L and R."""
+        if "L" in state:
+            state["PL"] = self._inverse_sqrt(state["L"])
+        if "R" in state:
+            state["PR"] = self._inverse_sqrt(state["R"])
+
+    def _schedule(self, t: int, T: int, warmup_frac: float = 0.1) -> float:
+        """Linear warmup followed by cosine decay."""
+        w = max(1, int(warmup_frac * T))
+        if t <= w:
+            return t / w
+        return 0.5 * (1.0 + math.cos(math.pi * (t - w) / max(1, T - w)))
+
+    def step(self, p: torch.Tensor, g: torch.Tensor, state: dict, t: int, T: int, lr: float) -> torch.Tensor:
+        """Return the update of this tensor (same shape as p); the harness applies p += delta."""
+        m, v = state["m"], state["v"]
+        
+        # Update first and second moment estimates
+        m.mul_(0.9).add_(g, alpha=0.1)
+        v.mul_(0.99).addcmul_(g, g, value=0.01)
+        
+        # Bias correction
+        bias1 = 1 - 0.9 ** t
+        bias2 = 1 - 0.99 ** t
+        m_hat = m / bias1
+        v_hat = v / bias2
+        
+        # Adam step for normalization
+        adam_step = m_hat / (v_hat.sqrt() + 1e-8)
+        
+        if p.dim() < 2:
+            # Use Adam for vectors (biases, gains)
+            scale = self._schedule(t, T)
+            return -lr * scale * adam_step
+        
+        # Reshape gradient to 2D for matrix operations
+        G = g.reshape(p.shape[0], -1)
+        D = m_hat.reshape(G.shape)
+        
+        # Update covariance matrices
+        if "L" in state:
+            state["L"].mul_(0.9).add_(G @ G.T, alpha=0.1)
+        if "R" in state:
+            state["R"].mul_(0.9).add_(G.T @ G, alpha=0.1)
+        
+        # Refresh preconditioners every 5 steps
+        if t % 5 == 1:
+            self._refresh_preconditioners(state)
+        
+        # Apply preconditioning
+        if "L" in state:
+            D = state["PL"] @ D
+        if "R" in state:
+            D = D @ state["PR"]
+        
+        # Grafting: normalize the Shampoo step to have the same norm as the Adam step
+        D_norm = D.norm()
+        adam_norm = adam_step.norm()
+        if D_norm > 1e-30:
+            D = D * (adam_norm / D_norm)
+        
+        scale = self._schedule(t, T)
+        return -lr * scale * D.reshape(p.shape)
+```
+
+**R4#3** — fitness -0.2736
+
+> A modified Shampoo optimizer using exponential moving average gradient covariance matrices with adaptive damping, Adam grafting for step normalization, and a linear-warmup cosine-decay learning rate schedule that refreshes preconditioners every 3 steps instead of 5 for faster adaptation to ill-conditioning.
+
+```python
+import torch
+import math
+
+
+class UpdateRule:
+    """Optimizer for one parameter tensor; the harness builds one instance (with no
+    arguments) and one state for every parameter tensor of the network.
+
+    Tensors keep their natural shapes: weight matrices (out, in), convolution
+    kernels (out, in, kh, kw), embeddings (vocab, dim), biases and normalisation
+    gains (n,).
+    """
+
+    def init_state(self, p: torch.Tensor) -> dict:
+        """Return the initial state of this tensor: tensors and numbers."""
+        st = {
+            "m": torch.zeros_like(p),
+            "v": torch.zeros_like(p),
+        }
+        if p.dim() >= 2:
+            rows, cols = p.shape[0], p[0].numel()
+            # Store covariance matrices for rows and columns
+            st["L"] = torch.zeros(rows, rows, device=p.device, dtype=p.dtype)
+            st["R"] = torch.zeros(cols, cols, device=p.device, dtype=p.dtype)
+            # Preconditioners (inverse square roots)
+            st["PL"] = torch.eye(rows, device=p.device, dtype=p.dtype)
+            st["PR"] = torch.eye(cols, device=p.device, dtype=p.dtype)
+        return st
+
+    def _inverse_sqrt(self, A: torch.Tensor, rel_eps: float = 1e-6) -> torch.Tensor:
+        """Compute A^(-1/2) for symmetric PSD matrix A in float64."""
+        A = A.double()
+        n = A.shape[0]
+        # Add damping to ensure positive definiteness
+        damping = rel_eps * (A.trace() / n).clamp_min(1e-30)
+        A = A + damping * torch.eye(n, device=A.device, dtype=A.dtype)
+        
+        try:
+            lam, U = torch.linalg.eigh(A)
+            # Clamp eigenvalues to avoid division by zero or negative values
+            lam = lam.clamp_min(rel_eps * lam.max().clamp_min(1e-30))
+            inv_sqrt = (U * lam.pow(-0.5)) @ U.T
+            return inv_sqrt.float()
+        except RuntimeError:
+            # Fallback to identity if eigh fails
+            return torch.eye(n, device=A.device, dtype=A.dtype).float()
+
+    def _refresh_preconditioners(self, state: dict) -> None:
+        """Recompute inverse square roots of L and R."""
+        if "L" in state:
+            state["PL"] = self._inverse_sqrt(state["L"])
+        if "R" in state:
+            state["PR"] = self._inverse_sqrt(state["R"])
+
+    def _schedule(self, t: int, T: int, warmup_frac: float = 0.1) -> float:
+        """Linear warmup followed by cosine decay."""
+        w = max(1, int(warmup_frac * T))
+        if t <= w:
+            return t / w
+        return 0.5 * (1.0 + math.cos(math.pi * (t - w) / max(1, T - w)))
+
+    def step(self, p: torch.Tensor, g: torch.Tensor, state: dict, t: int, T: int, lr: float) -> torch.Tensor:
+        """Return the update of this tensor (same shape as p); the harness applies p += delta."""
+        m, v = state["m"], state["v"]
+        
+        # Update first and second moment estimates
+        m.mul_(0.9).add_(g, alpha=0.1)
+        v.mul_(0.99).addcmul_(g, g, value=0.01)
+        
+        # Bias correction
+        bias1 = 1 - 0.9 ** t
+        bias2 = 1 - 0.99 ** t
+        m_hat = m / bias1
+        v_hat = v / bias2
+        
+        # Adam step for normalization
+        adam_step = m_hat / (v_hat.sqrt() + 1e-8)
+        
+        if p.dim() < 2:
+            # Use Adam for vectors (biases, gains)
+            scale = self._schedule(t, T)
+            return -lr * scale * adam_step
+        
+        # Reshape gradient to 2D for matrix operations
+        G = g.reshape(p.shape[0], -1)
+        D = m_hat.reshape(G.shape)
+        
+        # Update covariance matrices
+        if "L" in state:
+            state["L"].mul_(0.9).add_(G @ G.T, alpha=0.1)
+        if "R" in state:
+            state["R"].mul_(0.9).add_(G.T @ G, alpha=0.1)
+        
+        # Refresh preconditioners every 3 steps
+        if t % 3 == 1:
+            self._refresh_preconditioners(state)
+        
+        # Apply preconditioning
+        if "L" in state:
+            D = state["PL"] @ D
+        if "R" in state:
+            D = D @ state["PR"]
+        
+        # Grafting: normalize the Shampoo step to have the same norm as the Adam step
+        D_norm = D.norm()
+        adam_norm = adam_step.norm()
+        if D_norm > 1e-30:
+            D = D * (adam_norm / D_norm)
+        
+        scale = self._schedule(t, T)
+        return -lr * scale * D.reshape(p.shape)
 ```
 <!-- END:top_rules_R4 -->
 
@@ -1379,14 +1528,14 @@ class UpdateRule:
 Mỗi mẫu được gắn nhãn theo motif có trong code (`analysis/motifs.py`). Mỗi ô của bảng gồm: % mẫu hợp lệ có cơ chế đó / số cá thể trong quần thể cuối có cơ chế đó / fitness tốt nhất trong các mẫu có cơ chế đó. R1/R2 và R3/R4 dùng hai thiết lập khác nhau nên fitness không so trực tiếp được. Quần thể cuối của R4 có tính cả seed.
 
 <!-- BEGIN:groups -->
-| mechanism group | R1: % samples / in final pop / best fitness | R2: % samples / in final pop / best fitness | R3: % samples / in final pop / best fitness |
-|---|---|---|---|
-| 1. Momentum / averaging | 97% / 10/10 / -0.144 | 99% / 16/16 / -0.124 | 96% / 16/16 / -0.095 |
-| 2. Adaptive diagonal scaling (second moment, sign) | 84% / 10/10 / -0.144 | 83% / 16/16 / -0.124 | 82% / 16/16 / -0.095 |
-| 3. Step-size schedule (t or t/T) | 87% / 10/10 / -0.144 | 45% / 14/16 / -0.124 | 85% / 16/16 / -0.095 |
-| 4. Regularisation / robustness (weight decay, clipping) | 21% / 0/10 / -0.114 | 37% / 11/16 / -0.124 | 5% / 0/16 / -0.016 |
-| 5. Matrix (second-order) preconditioning | 0% / 0/10 / – | 0% / 0/16 / – | 2% / 0/16 / +0.101 |
-| 5b. Layer-wise normalisation (per-tensor norms) | 0% / 0/10 / – | 0% / 0/16 / – | 29% / 0/16 / -0.065 |
+| mechanism group | R1: % samples / in final pop / best fitness | R2: % samples / in final pop / best fitness | R3: % samples / in final pop / best fitness | R4: % samples / in final pop / best fitness |
+|---|---|---|---|---|
+| 1. Momentum / averaging | 97% / 10/10 / -0.144 | 99% / 16/16 / -0.124 | 96% / 16/16 / -0.095 | 99% / 16/16 / -0.302 |
+| 2. Adaptive diagonal scaling (second moment, sign) | 84% / 10/10 / -0.144 | 83% / 16/16 / -0.124 | 82% / 16/16 / -0.095 | 94% / 16/16 / -0.302 |
+| 3. Step-size schedule (t or t/T) | 87% / 10/10 / -0.144 | 45% / 14/16 / -0.124 | 85% / 16/16 / -0.095 | 92% / 16/16 / -0.302 |
+| 4. Regularisation / robustness (weight decay, clipping) | 21% / 0/10 / -0.114 | 37% / 11/16 / -0.124 | 5% / 0/16 / -0.016 | 22% / 8/16 / -0.302 |
+| 5. Matrix (second-order) preconditioning | 0% / 0/10 / – | 0% / 0/16 / – | 2% / 0/16 / +0.101 | 53% / 16/16 / -0.302 |
+| 5b. Layer-wise normalisation (per-tensor norms) | 0% / 0/10 / – | 0% / 0/16 / – | 29% / 0/16 / -0.065 | 77% / 16/16 / -0.302 |
 <!-- END:groups -->
 
 **Nhóm 1 — momentum và lấy trung bình.** Có ở 96–99% mẫu, và ở mọi cá thể của mọi quần thể cuối. Biến thể đáng chú ý là momentum hai tốc độ (R1, R2) và Nesterov (R2, R3). Best practice tương ứng: heavy ball, Nesterov, NAdam.
@@ -1416,7 +1565,9 @@ Mục 8.1–8.2 đo các rule này so với NGD.
 - R1 và R2 không cho phép.
 - R3 cho phép, nhưng chỉ 2% mẫu dùng và đều thua Adam (mục 4.3).
 - Biến thể nhẹ hơn là **chuẩn hóa theo layer (5b)**: chia cho norm của cả tensor, kiểu LARS/LAMB. Nó phổ biến hơn (29% mẫu R3, tốt nhất −0.065) nhưng không vào quần thể cuối.
-- <!-- R4_GROUP5 -->
+- **Có seed (R4):** quần thể cuối gồm 16/16 preconditioner ma trận; rule tốt nhất là Shampoo² (mục 4.4).
+
+*Lưu ý khi đọc cột R4:* nhóm 4 và 5b bị đếm thừa. `clamp_min` trong damping của Shampoo khớp với motif "clipping", và các phép norm dùng để graft độ lớn bước (Shampoo, Muon) khớp với motif "norm theo tensor". Grafting đúng là một dạng chuẩn hóa theo layer, nhưng không phải regularization.
 
 **Tổng kết: EoH tái phát hiện được best practice nào?**
 
@@ -1431,7 +1582,8 @@ Mục 8.1–8.2 đo các rule này so với NGD.
 | Weight decay | không | ≤ 2% mẫu ở mọi run |
 | Clipping, chặn bước | có | 11/16 rule cuối của R2 |
 | Chuẩn hóa theo layer | thử nhưng không thắng | 29% mẫu R3, 0/16 rule cuối |
-| Preconditioner Kronecker / trực giao | không tự tìm ra | 2% mẫu R3, đều thua Adam. <!-- R4_TABLE --> |
+| Preconditioner Kronecker / trực giao | không tự tìm ra; khi có seed thì cải tiến được | 2% mẫu R3, đều thua Adam; R4: 16/16 rule cuối, best −0.302 so với −0.180 của Shampoo |
+| Preconditioner "bậc một" thay cho "căn bậc hai" (gần NGD hơn) | có, hai lần | R1: $m/\sqrt v \to m/v$ ($k=+1$); R4: Shampoo $\to$ Shampoo² |
 
 ## 6. Tune kết quả: ablation và polish theo kiểu memetic
 
@@ -1755,11 +1907,11 @@ class UpdateRule:
 | R1@402 | −0.148 | −0.191 |
 | R2#1 | −0.118 | −0.145 |
 | R3#1 | −0.106 | −0.118 |
-<!-- R4_POLISH_ROW -->
 
 - **R1, R2:** cả hai rule R1 đã polish đều học được LR annealing, nhưng gắn với số bước tuyệt đối vì không biết T.
 - **R3:** pha cấu trúc không tìm được edit nào có lợi; chỉ hằng số thay đổi ($\beta_1$ 0.90 → 0.927, $\beta_2$ 0.999 → 0.9985, sàn của cosine 1% → 1.2%). Rule của R3 vốn đã gọn.
-- **Polish có overfit.** Trên bộ search với seed mới, cả ba bản polish của R1/R2 đều tốt hơn bản gốc (mục 7.1). Nhưng trên 5 task held-out, polish chỉ cải thiện 9/15 cặp (rule, task) và làm tệ đi 6/15. Chẳng hạn trên GPT: R2 best +0.129 → +0.276, R1@402 +0.141 → +0.194. Tune trên 4 task nhỏ và 1–2 seed thì dễ khớp vào chính các task đó.
+- **R4 không polish.** Phần lớn cải tiến của R4 vốn đã là chỉnh tham số bằng toán tử m2 trên seed Shampoo, tức chính việc polish làm. Ngoài ra, hằng số như chu kỳ `t % 5` không nên tune bằng ES liên tục.
+- **Polish có overfit.** Trên bộ search với seed mới, các bản polish tốt hơn bản gốc ở phần lớn task (ngoại lệ: bản polish của R2 best kém hơn trên CNN, −0.004 so với −0.033; mục 7.1). Nhưng trên 5 task held-out, polish chỉ cải thiện 9/15 cặp (rule, task) và làm tệ đi 6/15. Chẳng hạn trên GPT: R2 best +0.129 → +0.276, R1@402 +0.141 → +0.194. Tune trên 4 task nhỏ và 1–2 seed thì dễ khớp vào chính các task đó.
 
 ## 7. Benchmark
 
@@ -1850,6 +2002,9 @@ Lr được tune bằng seed 0. Các seed dùng để báo cáo (1–5, hoặc 1
 | R3 #2 | -0.218 ± 0.011 (×1.60) | -0.064 ± 0.008 (×1.64) | -0.079 ± 0.014 (×1.50) | -0.026 ± 0.006 (×1.29) |
 | R3 #3 | -0.201 ± 0.008 (×1.60) | -0.071 ± 0.009 (×1.64) | -0.046 ± 0.014 (×1.24) | -0.022 ± 0.006 (×1.24) |
 | R3 best, polished | -0.230 ± 0.008 (×1.78) | -0.075 ± 0.008 (×1.71) | -0.063 ± 0.013 (×1.40) | -0.027 ± 0.006 (×1.35) |
+| R4 best | -0.706 ± 0.003 (×2.67) | -0.140 ± 0.012 (×3.42) | -0.296 ± 0.016 (×3.00) | -0.054 ± 0.004 (×1.63) |
+| R4 #2 | -0.675 ± 0.003 (×2.67) | -0.073 ± 0.019 (×2.28) | -0.268 ± 0.016 (×3.00) | -0.051 ± 0.005 (×1.63) |
+| R4 #3 | -0.694 ± 0.006 (×2.67) | -0.061 ± 0.006 (×3.15) | -0.267 ± 0.019 (×3.00) | -0.051 ± 0.004 (×1.63) |
 <!-- END:bench_r3 -->
 
 <!-- BEGIN:curves_r3 -->
@@ -1870,7 +2025,8 @@ _(chưa có dữ liệu: chạy bước tương ứng trong `scripts/run_pipelin
 
 - **R3 thắng baseline best practice đường chéo.** Rule của R3 thắng AdamW + warmup + cosine trên cả 4 task, và thắng cả Lion, SGD có cosine. R3 best đã polish đạt −0.230 / −0.075 / −0.063 / −0.027, so với −0.026 / −0.015 / −0.013 / −0.008 của AdamW+cosine.
 - **Nhưng R3 thua preconditioner ma trận đúng ở chỗ ma trận có lợi.** Trên softmax đã xoay, Shampoo đạt −0.318 (×2.0). Trên CNN, Muon đạt −0.248 (×2.6) và Shampoo −0.220. Riêng char-Transformer, R3 polished (−0.027, ×1.35) ngang Shampoo (−0.029, ×1.35) và hơn Muon (−0.003).
-- <!-- R4_BENCH -->
+- **R4 thắng mọi baseline trên seed mới.** R4#1 (Shampoo²) đạt −0.706 / −0.140 / −0.296 / −0.054, nhanh hơn Adam ×2.7 / ×3.4 / ×3.0 / ×1.6, và hơn Shampoo (−0.318 / −0.099 / −0.220 / −0.029) ở cả 4 task. Hai rule tiếp theo của R4, cùng họ Shampoo², cho kết quả tương tự. Lợi thế lớn nhất vẫn ở softmax đã xoay: mức cải thiện so với Adam gấp hơn 2 lần của Shampoo.
+- <!-- R4_TRANSFER -->
 
 ## 8. Nối với NGD bằng thực nghiệm
 
@@ -1985,10 +2141,10 @@ Rotation penalty là độ chênh log-AUC giữa bài softmax ill-cond. bị xoa
 **Đọc bảng:**
 
 - **Trần của rule đường chéo.** Ngay cả hướng diag-NGD *chính xác* cũng chỉ đạt $\rho_F=0.69$ trên softmax và 0.19 trên tiny MLP (NGD = 1), với cos(diag-NGD, NGD) = 0.61 và 0.26. Trên MLP, Fisher rất xa đường chéo, nên mọi rule đường chéo chỉ nắm được một phần nhỏ của NGD.
-- **Rule tiến hóa không vượt trần đó.** Cos giữa bước của chúng và hướng full NGD là 0.42–0.59, ngang Adam (0.58). $\rho_F(P)$ của R1 best (0.34 trên softmax) còn thấp hơn Adam (0.67). Vậy R1 best nhanh không phải vì hình học của preconditioner tốt hơn, mà vì độ lớn bước (boost) và số mũ $k=+1$.
+- **Rule tiến hóa không vượt trần đó.** Cos giữa bước của chúng và hướng full NGD là 0.40–0.59, ngang Adam (0.58). $\rho_F(P)$ của R1 best (0.34 trên softmax) còn thấp hơn Adam (0.67). Vậy R1 best nhanh không phải vì hình học của preconditioner tốt hơn, mà vì độ lớn bước (boost) và số mũ $k=+1$.
 - **Rotation test là phép thử rõ nhất.**
   - Penalty của SGD và full NGD là 0.00, đúng như P3 dự đoán.
-  - Adam +0.73, diag-NGD +0.98, còn mọi rule tiến hóa từ +0.80 đến +1.57, **lớn hơn cả diag-NGD**.
+  - Adam +0.73, diag-NGD +0.98, còn các rule tiến hóa từ +0.80 đến +1.57; riêng họ R1 best (+1.16 đến +1.57) **còn lớn hơn cả diag-NGD**.
   - Rule thắng nhiều nhất trên bài thẳng trục cũng mất nhiều nhất khi bài bị xoay. Lợi thế của chúng đến từ việc khai thác cấu trúc trục tọa độ, không phải từ việc xấp xỉ NGD tốt hơn.
 
 ### 8.3 Rule theo tensor trên bài đã xoay (kiểm P4)
@@ -1996,30 +2152,162 @@ Rotation penalty là độ chênh log-AUC giữa bài softmax ill-cond. bị xoa
 Cùng các phép đo như 8.2, cho các rule theo tensor (R3, R4) và các baseline Shampoo, Muon, AdamW+cosine, trên tiny MLP và trên **softmax đã xoay**, bài mà R3/R4 dùng để search. Rotation penalty vẫn đo trên cặp softmax thẳng trục / đã xoay như 8.2.
 
 <!-- BEGIN:alignment_r3 -->
-_(chưa có dữ liệu: chạy bước tương ứng trong `scripts/run_pipeline.sh`)_
+**tiny MLP / F-MNIST**
+
+| optimizer | ρ_F(P) | ρ_F(Δ) | cos(Δ, full NGD) | cos(Δ, diag-NGD) |
+|---|---|---|---|---|
+| full NGD | 0.181 | +0.211 | +0.410 | +0.059 |
+| Adam | 0.217 | +0.026 | +0.258 | +0.694 |
+| AdamW + cosine | 0.190 | +0.017 | +0.212 | +0.708 |
+| Muon + cosine | 0.174 | +0.059 | +0.339 | +0.440 |
+| Shampoo + cosine | 0.149 | +0.011 | +0.387 | +0.608 |
+| R3 best | 0.155 | +0.027 | +0.207 | +0.690 |
+| R3 #2 | 0.155 | +0.015 | +0.302 | +0.536 |
+| R3 #3 | 0.159 | +0.025 | +0.216 | +0.660 |
+| R3 best, polished | 0.148 | +0.018 | +0.243 | +0.640 |
+| R4 best | 0.130 | +0.033 | +0.467 | +0.418 |
+| R4 #2 | 0.144 | +0.053 | +0.433 | +0.388 |
+| R4 #3 | 0.146 | +0.028 | +0.461 | +0.399 |
+
+**softmax ill-cond. (rotated)**
+
+| optimizer | ρ_F(P) | ρ_F(Δ) | cos(Δ, full NGD) | cos(Δ, diag-NGD) | rotation penalty |
+|---|---|---|---|---|---|
+| full NGD | 0.362 | +0.229 | +0.547 | +0.126 | +0.000 |
+| Adam | 0.573 | +0.102 | +0.250 | +0.658 | +0.729 |
+| AdamW + cosine | 0.506 | +0.085 | +0.199 | +0.671 | +0.827 |
+| Muon + cosine | 0.395 | +0.100 | +0.289 | +0.568 | +0.000 |
+| Shampoo + cosine | 0.434 | +0.065 | +0.393 | +0.647 | +0.028 |
+| R3 best | 0.421 | +0.128 | +0.200 | +0.591 | +0.720 |
+| R3 #2 | 0.388 | +0.112 | +0.265 | +0.667 | +0.570 |
+| R3 #3 | 0.435 | +0.139 | +0.201 | +0.594 | +0.704 |
+| R3 best, polished | 0.415 | +0.116 | +0.226 | +0.640 | +0.669 |
+| R4 best | 0.433 | +0.085 | +0.562 | +0.484 | +0.072 |
+| R4 #2 | 0.425 | +0.103 | +0.558 | +0.466 | +0.060 |
+| R4 #3 | 0.393 | +0.079 | +0.550 | +0.483 | +0.059 |
+
+**Reference directions** (same probe gradient, averaged over all trajectories above):
+
+| task | ρ_F(−g) (SGD) | ρ_F(−g/√diag F) | ρ_F(−g/diag F) (diag-NGD) | ρ_F(−F⁻¹g) (NGD) | cos(diag-NGD, NGD) |
+|---|---|---|---|---|---|
+| tiny MLP / F-MNIST | 0.161 | 0.179 | 0.196 | 1.000 | +0.231 |
+| softmax ill-cond. (rotated) | 0.534 | 0.547 | 0.556 | 1.000 | +0.152 |
 <!-- END:alignment_r3 -->
 
 <!-- BEGIN:alignment_r3_fig -->
-_(chưa có dữ liệu: chạy bước tương ứng trong `scripts/run_pipeline.sh`)_
+![Fisher-cosine along training](figures/alignment_rhoF_tensor.png)
 <!-- END:alignment_r3_fig -->
 
-<!-- NGD_R3 -->
+**Đọc bảng:**
+
+- **Preconditioner Kronecker và trực giao đẳng biến với phép xoay, đúng như P4.** Rotation penalty của Muon là 0.00, Shampoo +0.03, ba rule tốt nhất của R4 +0.06 đến +0.07, và full NGD 0.00. Các rule đường chéo thì mất nhiều: Adam +0.73, AdamW+cosine +0.83, các rule của R3 +0.57 đến +0.72.
+- **Bước của Shampoo² (R4) căn với NGD ngang chính rule NGD.** Trên softmax đã xoay, cos giữa bước thật và hướng full NGD là 0.55–0.56 với ba rule của R4. So sánh: Shampoo 0.39, Muon 0.29, Adam 0.25, R3 0.20–0.27. Chính rule full NGD đạt 0.55; bước của nó cũng dùng momentum và chỉ tính lại Fisher mỗi 10 bước, nên đây là "trần thực tế". Trên tiny MLP, R4 đạt 0.43–0.47, nhỉnh hơn full NGD (0.41), so với 0.39 của Shampoo và 0.26 của Adam. (Trung bình bỏ qua checkpoint cuối khi lịch cosine đưa bước về 0, vì hướng của bước bằng 0 không xác định.)
+- **Và R4 hội tụ nhanh gần như NGD trên bài đã xoay.** Log-AUC trên softmax đã xoay (cột "rotated" của rotation test): R4#1 −1.13, full NGD −1.16, Shampoo −0.76, Muon −0.59, R3#1 −0.53, Adam −0.21. Trên bản thẳng trục thì khác: rule đường chéo của R3 lại nhỉnh hơn cả full NGD (−1.25 so với −1.16), vì preconditioner đường chéo chính xác ở đó, cộng thêm schedule.
+- **Đọc theo P4.** Bước từ Shampoo ($L^{-1/4}GR^{-1/4}\approx F^{-1/2}$) sang Shampoo² ($L^{-1/2}GR^{-1/2}\approx F^{-1}$) nâng cos với NGD từ 0.39 lên 0.56, và đưa tốc độ trên bài đã xoay từ mức của Shampoo lên mức của full NGD. Vậy thứ EoH tìm ra ở R4 là một xấp xỉ NGD tốt hơn theo đúng nghĩa đo được, không chỉ là một tổ hợp tham số may mắn.
+- *Hai cột chỉ để tham khảo:* $\rho_F(P)$ chỉ ước lượng phần đường chéo của preconditioner nên không có ý nghĩa với rule ma trận; $\rho_F(\Delta)$ bị nhiễu bởi tiến độ huấn luyện (mục 8.4). Hình dưới vẽ cos với full NGD dọc quá trình huấn luyện.
 
 ### 8.4 Toàn bộ quần thể R1: fitness có đi kèm "giống NGD" không?
 
+Mỗi mẫu hợp lệ của R1 là một optimizer, nên cả quần thể là một "thí nghiệm tự nhiên". Trên 200 mẫu chọn ngẫu nhiên (cố định seed; riêng $k_\text{rule}$ đo trên cả 979 mẫu), ta đo các chỉ số "giống NGD" của 8.1–8.2 rồi tính tương quan hạng Spearman với fitness, kèm khoảng tin cậy bootstrap 95%. **ρ âm nghĩa là càng giống NGD thì càng nhanh.** Các mẫu có chung tổ tiên nên không độc lập; các tương quan này mang tính mô tả, không phải kiểm định.
+
 <!-- BEGIN:population -->
-_(chưa có dữ liệu: chạy bước tương ứng trong `scripts/run_pipeline.sh`)_
+| outcome | NGD-likeness metric | n | Spearman ρ | 95% CI (bootstrap) |
+|---|---|---|---|---|
+| fitness | `k_rule` | 979 | -0.20 | [-0.28, -0.13] |
+| fitness | `softmax_illcond:alpha_true` | 200 | -0.58 | [-0.70, -0.46] |
+| fitness | `softmax_illcond:b_true` | 200 | -0.17 | [-0.31, -0.03] |
+| fitness | `softmax_illcond:k_fit` | 200 | -0.42 | [-0.58, -0.26] |
+| fitness | `softmax_illcond:rhoF_P` | 199 | -0.21 | [-0.34, -0.06] |
+| fitness | `softmax_illcond:rhoF` | 199 | +0.55 | [+0.44, +0.65] |
+| fitness | `softmax_illcond:cos_full` | 199 | -0.42 | [-0.54, -0.28] |
+| fitness | `softmax_illcond:cos_diag` | 199 | -0.62 | [-0.71, -0.50] |
+| fitness | `tiny_fmnist:rhoF_P` | 199 | +0.19 | [+0.04, +0.34] |
+| fitness | `tiny_fmnist:rhoF` | 199 | +0.44 | [+0.30, +0.56] |
+| fitness | `tiny_fmnist:cos_full` | 199 | -0.03 | [-0.18, +0.12] |
+| fitness | `tiny_fmnist:cos_diag` | 199 | -0.21 | [-0.35, -0.07] |
+| task score: char-Transformer | `k_rule` | 979 | +0.20 | [+0.13, +0.27] |
+| task score: CNN / CIFAR-10 | `k_rule` | 979 | +0.11 | [+0.04, +0.17] |
+| task score: MLP / F-MNIST | `k_rule` | 979 | +0.07 | [-0.00, +0.14] |
+| task score: softmax ill-cond. | `k_rule` | 979 | -0.35 | [-0.42, -0.28] |
+| task score: softmax ill-cond. | `softmax_illcond:alpha_true` | 200 | -0.70 | [-0.78, -0.61] |
+| task score: softmax ill-cond. | `softmax_illcond:b_true` | 200 | -0.03 | [-0.18, +0.12] |
+| task score: softmax ill-cond. | `softmax_illcond:k_fit` | 200 | -0.62 | [-0.73, -0.49] |
+| task score: softmax ill-cond. | `softmax_illcond:rhoF_P` | 199 | -0.08 | [-0.22, +0.05] |
+| task score: softmax ill-cond. | `softmax_illcond:rhoF` | 199 | +0.56 | [+0.45, +0.67] |
+| task score: softmax ill-cond. | `softmax_illcond:cos_full` | 199 | -0.30 | [-0.44, -0.15] |
+| task score: softmax ill-cond. | `softmax_illcond:cos_diag` | 199 | -0.63 | [-0.72, -0.52] |
+
+| family (motif in code) | samples | median fitness |
+|---|---|---|
+| √(second moment), Adam-like | 710 | -0.017 |
+| sign-based | 45 | +0.254 |
+| other | 224 | +0.193 |
+
+![pop_k_rule.png](figures/pop_k_rule.png)
+
+![pop_rhoF_P_softmax_illcond.png](figures/pop_rhoF_P_softmax_illcond.png)
+
+![pop_rhoF_P_tiny_fmnist.png](figures/pop_rhoF_P_tiny_fmnist.png)
 <!-- END:population -->
 
-<!-- POPULATION -->
+**Đọc bảng:**
+
+- **Trên softmax thẳng trục, giống diag-NGD đi kèm với nhanh.** Với fitness: cos(Δ, diag-NGD) ρ = −0.62, số mũ Fisher α ρ = −0.58, cos(Δ, full NGD) ρ = −0.42. Với riêng điểm của task softmax, α còn mạnh hơn (ρ = −0.70).
+- **Nhưng lợi thế này chỉ có ở softmax.** $k_\text{rule}$ tương quan với điểm softmax (ρ = −0.35), nhưng *ngược chiều* với điểm char-Transformer (ρ = +0.20) và CNN (+0.11). Trên tiny MLP, nơi Fisher xa đường chéo, độ căn với full NGD không dự báo fitness (ρ = −0.03). Đây là bằng chứng ở cấp quần thể cho câu chuyện "chuyên gia" của R1: giống diag-NGD giúp ở bài có Fisher gần đường chéo, và phải trả giá ở Transformer.
+- **Hình học của preconditioner ($\rho_F(P)$) chỉ liên hệ yếu** (ρ = −0.21 trên softmax, +0.19 trên tiny MLP).
+- **$\rho_F$ của bước thật tương quan *dương* với fitness** (+0.55 và +0.44), nhưng chỉ số này bị nhiễu bởi tiến độ huấn luyện. Rule hội tụ nhanh sớm đi vào vùng gradient nhiễu, nơi $\rho_F(\Delta)$ thấp; vì vậy nó không dùng được để so các rule với nhau.
 
 ## 9. Thảo luận và hạn chế
 
-<!-- DISCUSSION -->
+**EoH làm tốt:**
+
+- **Tái phát hiện nhanh các thành phần chuẩn** (momentum, Adam, Nesterov, bias correction, cosine theo $t/T$), rồi ghép chúng thành rule nhanh hơn Adam đã tune. Fitness tốt nhất của các run blind là −0.095 đến −0.144, tức loss (trung bình hình học dọc quỹ đạo) thấp hơn Adam khoảng 9–13%.
+- **Rẻ.** Qwen 27B chạy local, mỗi run khoảng 1–1.5 giờ trên hai GPU H100, không tốn tiền API.
+- **Tinh chỉnh tốt khi được cho điểm xuất phát đúng.** Với seed Shampoo, R4 tìm ra Shampoo² sau khoảng 150 mẫu và kéo fitness từ −0.180 xuống −0.302. Phần lớn là chỉnh tham số (m2), cộng một thay đổi cấu trúc nhỏ nhưng đúng chỗ: số mũ (m1).
+
+**EoH làm chưa tốt:**
+
+- **Không tạo cơ chế mới về chất.** Mọi rule tốt nhất là tổ hợp các thành phần đã biết. Phần "mới" nhất là các tổ hợp đặc thù cho bài toán: $m/v$ không căn kèm boost (R1), chặn $|m|/\sqrt v$ (R2).
+- **Không tự tìm ra preconditioning ma trận** (R3), dù được cho đủ công cụ và áp lực chọn lọc.
+- **Chọn lọc theo fitness ngắn hạn bỏ qua những thứ chỉ có lợi về dài hạn**, như warmup và weight decay.
+- **Thought không đáng tin.** 33% mẫu R3 tự nhận là bậc hai, nhưng chỉ 5 mẫu đúng như vậy. Muốn biết EoH tìm ra gì thì phải đọc code (hoặc gắn nhãn motif như ở đây), không thể dựa vào thought.
+
+**Thiết kế bài toán quan trọng hơn LLM.** Mỗi thay đổi R1 → R2 → R3 (fitness robust, chặn bản sao, cho T, validation loss, bài đã xoay) làm thay đổi loại rule nổi lên nhiều hơn bất kỳ điều chỉnh nào khác. R1 tối ưu đúng cái được đo (trung bình qua task) và thu được một chuyên gia cho softmax. Đây là một dạng nhẹ của reward hacking: thứ EoH tìm ra phản ánh trước hết hàm fitness và bộ task.
+
+**Nút thắt là đa dạng ý tưởng, không phải số mẫu.** R1 bão hòa sau khoảng 700 mẫu, còn R2 (giữ đa dạng) vẫn cải thiện ở cuối run. R3 cho thấy chặn bản sao theo code là chưa đủ. Các hướng sửa đã có trong literature, đều không cần huấn luyện LLM:
+
+- giữ chỗ cho từng nhóm cơ chế (niching kiểu MAP-Elites), hoặc tìm kiếm cây giữ cả nhánh đang yếu (MCTS-AHD);
+- đưa lý do fail (quá chậm, hết bộ nhớ, NaN) về cho LLM sửa (LLaMEA), kèm phản tư so sánh cặp cha mẹ tốt/kém (ReEvo).
+
+R4 là phép thử ngược. Với cùng ý tưởng số mũ −1/2, các bản e1 viết lại từ đầu đều fail, còn bản m1 sửa trên một Shampoo đã chạy tốt thì thắng lớn. Vậy thứ R3 thiếu không phải là ý tưởng (thought của R3 có nhắc tới "inverse square root of the gradient covariance" 5 lần), mà là một bản cài đặt đủ tốt để ý tưởng sống sót qua chọn lọc.
+
+**Memetic polish** cải thiện lớn trên objective tune (R1: −0.07 → −0.19), nhưng chỉ tổng quát hóa một phần: 9/15 cặp (rule, task held-out) tốt lên, 6/15 tệ đi.
+
+**Câu trả lời cho RQ3 (nối với NGD):**
+
+- Một số rule tiến hóa *có* tính chất của NGD đường chéo. Rule của R1 có $k=+1$, tức bất biến với scale đường chéo, và tính chất này đi kèm tốc độ trên bài có Fisher gần đường chéo.
+- Nhưng không rule element-wise nào vượt được trần của xấp xỉ đường chéo: cosine với full NGD ngang Adam, và rotation penalty ngang hoặc lớn hơn diag-NGD.
+- Preconditioner Kronecker không bị trần đó, vì chúng đẳng biến với phép xoay đầu vào (P4). Bước EoH tự làm ở R4 (Shampoo → Shampoo²) chính là bước đi từ "căn bậc hai" sang NGD Kronecker. Số đo cụ thể ở mục 8.3.
+
+**Hạn chế:**
+
+- Mỗi cấu hình chỉ có 1 run EoH. Error bar trong bảng là theo seed huấn luyện, không theo seed của search, nên chênh lệch giữa các run có thể một phần là nhiễu.
+- Task nhỏ và horizon ngắn (150–3000 bước). Kết luận về Transformer lớn hay LLM chưa kiểm được; GPT 6 lớp đã cho thấy rule tìm được tổng quát kém sang Transformer.
+- **Speedup tính theo số bước, không theo thời gian thực.** Shampoo và các biến thể của R4 tốn hơn Adam nhiều lần mỗi bước. Rule tốt nhất của R4 tính `eigh` mỗi 5 bước và không giới hạn kích thước ma trận. Trên ResNet-18 nó phải phân rã ma trận 4608×4608, nên không được đưa vào kiểm định held-out trên ResNet-18. <!-- STEP_COST -->
+- Lr của mọi rule được tune trên lưới thô (7 + 3 giá trị), nên rule nhạy với lr bị thiệt hơn.
+- LLM đã biết các optimizer phổ biến từ dữ liệu huấn luyện. "Tái phát hiện" ở đây là truy hồi và ghép lại, không phải phát minh từ đầu.
+- Sự cố ở R2 (khoảng 290 mẫu fail oan) và task description của R3 ghi sai khoảng T.
+- R4 có seed nên không trả lời được câu hỏi "EoH có tự tìm ra không".
 
 ## 10. Kết luận
 
-<!-- CONCLUSION -->
+1. **EoH là công cụ tốt để tái tổ hợp tri thức optimizer có sẵn trong LLM.** Với khoảng 1–1.5 giờ cho mỗi run trên hai GPU, nó tìm lại phần lớn best practice và ghép chúng thành rule nhanh hơn Adam đã tune trên đúng các task được chọn.
+2. **Thứ EoH tìm ra phản ánh hàm fitness và bộ task nhiều hơn là một "chân lý" về optimizer.** Đổi fitness (R1 → R2) hay đổi không gian tìm kiếm (R2 → R3) đều làm đổi loại rule nổi lên. Kiểm định trên seed mới và task held-out là bắt buộc.
+3. **Về NGD, hướng đi của EoH nhất quán với lý thuyết.** Khi được phép, nó dịch preconditioner về phía NGD (bậc một thay vì căn bậc hai), và lợi ích lớn nhất xuất hiện đúng nơi NGD mạnh nhất: bài ill-conditioned, nơi NGD trùng với Newton. Nhưng bước nhảy từ đường chéo sang ma trận không tự xảy ra trong ngân sách của ta; nó cần seed.
+4. **Hướng tiếp theo:**
+   - giữ chỗ cho từng nhóm cơ chế (niching), và phản hồi lỗi cho LLM;
+   - fitness tính theo thời gian thực thay vì số bước;
+   - task dài hơn, để regularization có đất thể hiện.
 
 ## Phụ lục A. Chứng minh ngắn
 
@@ -2042,7 +2330,7 @@ bash scripts/run_pipeline.sh search analysis                 # R1 and its analys
 bash scripts/run_pipeline.sh search_r2 polish validate       # R2; polish and validation of R1/R2 rules
 bash scripts/run_pipeline.sh search_r3 r3 validate_r3        # R3 (blind, per tensor) and its validation
 bash scripts/run_pipeline.sh search_r4 r4 validate_r4        # R4 (seeded)
-SUBSAMPLE=300 bash scripts/run_pipeline.sh population        # population analysis of R1
+SUBSAMPLE=200 bash scripts/run_pipeline.sh population        # population analysis of R1
 bash scripts/run_pipeline.sh report
 ```
 

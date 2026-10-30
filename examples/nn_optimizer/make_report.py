@@ -252,7 +252,7 @@ def benchmark_table(data):
         for t in tasks:
             c = row[t]
             if "error" in c:
-                cells.append("error")
+                cells.append("–" if c["error"] == "not run" else "error")
                 continue
             sp = f"×{c['speedup']:.2f}" if c.get("speedup") else "never"
             div = f", {c['n_diverged']} diverged" if c.get("n_diverged") else ""
@@ -322,6 +322,20 @@ def _setting(name, v):
     return "tensor" if "softmax_illcond_rot" in v.get("alignment", {}) else "elementwise"
 
 
+def _moving_rows(a):
+    """Checkpoints where the rule actually moved: at t = T a schedule that decays to zero gives a zero
+    step, whose direction (and every cosine of it) is undefined."""
+    return [r for r in a.get("rows", []) if r.get("kl", 0) > 0]
+
+
+def _all_means(a):
+    rows = _moving_rows(a)
+    if not rows:
+        return None
+    keys = [k for k in rows[0] if k not in ("t", "loss")]
+    return {k: float(np.nanmean([r[k] for r in rows])) for k in keys}
+
+
 def alignment_table(data, setting="elementwise"):
     if not any(_setting(n, v) == setting for n, v in data.items()):
         return None  # only the full-NGD reference row
@@ -336,7 +350,7 @@ def alignment_table(data, setting="elementwise"):
         headers += ["rotation penalty"] if rotation else []
         rows = []
         for name, v in data.items():
-            a = (v.get("alignment", {}).get(t) or {}).get("means", {}).get("all")
+            a = _all_means(v.get("alignment", {}).get(t) or {})
             row = [plotstyle.label(name)]
             if a is None:
                 row += ["–"] * 4
@@ -370,19 +384,24 @@ def fig_alignment(data, setting="elementwise"):
     tasks = [t for t in ALIGN_TASKS[setting] if any(t in v.get("alignment", {}) for v in data.values())]
     if not tasks:
         return None
+    # rho_F(P) estimates a *diagonal* preconditioner: meaningless for matrix rules, so the per-tensor
+    # setting plots the cosine between the actual step and the full-NGD direction instead
+    metric, ylabel = (("rhoF_P", "ρ_F of the preconditioner") if setting == "elementwise"
+                      else ("cos_full", "cos(step, full-NGD direction)"))
     plotstyle.apply()
     fig, axes = plt.subplots(1, len(tasks), figsize=(3.8 * len(tasks), 3.1), squeeze=False)
     for ax, t in zip(axes[0], tasks):
         for name, v in data.items():
             a = v.get("alignment", {}).get(t)
-            if not a or not a["rows"]:
+            rows = _moving_rows(a or {})
+            if not rows or name.endswith(("#2", "#3")):  # the tables keep the runner-ups; the figure stays readable
                 continue
-            ax.plot([r["t"] for r in a["rows"]], [r["rhoF_P"] for r in a["rows"]], color=plotstyle.color(name),
+            ax.plot([r["t"] for r in rows], [r[metric] for r in rows], color=plotstyle.color(name),
                     ls=plotstyle.linestyle(name), lw=1.6, label=plotstyle.label(name))
         ax.set_title(TASK_LABELS[t], loc="left")
         ax.set_xlabel("step")
         ax.set_ylim(0, 1.02)
-    axes[0][0].set_ylabel("ρ_F of the preconditioner")
+    axes[0][0].set_ylabel(ylabel)
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=min(len(labels), 4), frameon=False, fontsize=8)
     fig.tight_layout(rect=(0, 0, 1, 0.84))
@@ -573,6 +592,30 @@ def _merged(adir, pattern, depth=1):
     return out or None
 
 
+def _eval_tables(adir, suite):
+    """eval_<suite>.json plus rows from eval_<suite>-*.json (rules evaluated separately, each file with
+    its own Adam reference). Columns are the union of tasks; missing cells are marked "not run"."""
+    paths = [os.path.join(adir, f"eval_{suite}.json")] + sorted(glob.glob(os.path.join(adir, f"eval_{suite}-*.json")))
+    tables = [d for d in map(_load, paths) if d]
+    if not tables:
+        return None
+    out = dict(table={}, raw=[], metric=tables[0].get("metric"))
+    tasks = []
+    for d in tables:
+        for row in d["table"].values():
+            tasks += [t for t in row if t not in tasks]
+    for i, d in enumerate(tables):
+        for name, row in d["table"].items():
+            if i and name == "adam_ref":
+                continue  # one Adam reference row: the first file's
+            out["table"][name] = {t: row.get(t, dict(error="not run")) for t in tasks}
+        out["raw"] += [r for r in d["raw"] if not (i and r["rule"] == "adam_ref")]
+    for row in out["table"].values():
+        for t in tasks:
+            row.setdefault(t, dict(error="not run"))
+    return out
+
+
 # ── assembly ──────────────────────────────────────────────────────────────────
 
 def fill(report_path, blocks):
@@ -609,7 +652,7 @@ def main():
                 blocks[f"timeline_{run}"] = f.read().split("\n", 1)[1].strip()
 
     for suite in ("search", "transfer", "r3", "r3_transfer"):
-        data = _load(A(f"eval_{suite}.json"))
+        data = _eval_tables(args.adir, suite)
         blocks[f"bench_{suite}"] = benchmark_table(data) if data else None
         setting = SETTING_RUNS[suite]
         featured = [f"{r}#1" for r in runs if r in setting] + [

@@ -104,8 +104,8 @@ stage_r3() {
     $PY prob.py --baselines --r3
     $PY analysis/polish.py --rule run:R3:1 --metric val --workers 8
 }
-evolved_rules() {  # top-3 of a run plus its polished rules, as rule specs
-    local rules="run:$1:3"
+evolved_rules() {  # top-3 evolved rules of a run (seeds skipped) plus its polished rules, as rule specs
+    local rules="evolved:$1:3"
     for f in "$A"/polish_"$1"_*/*_polished.py; do [ -e "$f" ] && rules="$rules file:$f"; done
     echo "$rules"
 }
@@ -132,8 +132,11 @@ stage_validate_r4() {
     RULES=$(evolved_rules R4)
     $PY evaluation/transfer.py --rules $RULES --suite r3 --metric val --seeds 5 --seed-offset 1 \
         --workers ${WORKERS:-6} --merge-into "$A/eval_r3.json"
-    $PY evaluation/transfer.py --rules $RULES --suite r3_transfer --metric val --seeds 3 --seed-offset 1 \
-        --workers ${WORKERS:-4} --merge-into "$A/eval_r3_transfer.json"
+    # Held-out tasks for R4's best only, without ResNet-18: R4's best has no size cap on its Kronecker
+    # factors, so on ResNet-18 it would run eigh on 4608x4608 matrices every 5 steps (hours per run).
+    # Own file (with its own Adam reference), merged into the R3 table by make_report.py.
+    $PY evaluation/transfer.py --rules evolved:R4:1 --suite gpt_v,mlp_fmnist_long_v,cnn_cifar_bs512_v,softmax_rot_long_v \
+        --metric val --seeds 3 --seed-offset 1 --workers ${WORKERS:-4} --out "$A/eval_r3_transfer-R4.json"
     $PY analysis/ngd_alignment.py --rules $RULES --no-full-ngd --tasks softmax_illcond_rot tiny_fmnist \
         --out "$A/ngd_alignment_r4.json"
 }
