@@ -17,7 +17,8 @@
 - **Hai bài học về EoH.**
   1. Thought của LLM không đáng tin: 33% mẫu R3 tự nhận là "second-order", nhưng code của chúng là rule đường chéo.
   2. Ý tưởng bậc hai là bài toán đánh lừa. Viết lại từ đầu thì fail; sửa nhỏ trên một bản Shampoo đã chạy tốt thì thắng lớn. Muốn EoH tự tìm ra, cần cơ chế giữ đa dạng theo ý tưởng và phản hồi lỗi cho LLM.
-- **Hạn chế chính.** Mỗi cấu hình chỉ có 1 run; task nhỏ, horizon ngắn; speedup tính theo số bước, trong khi rule tốt nhất của R4 tốn hơn Adam nhiều lần mỗi bước (mục 9).
+- **Nhanh hơn chưa chắc tốt hơn.** Shampoo² của R4 thắng mọi baseline trên các task search (kể cả trên seed mới), nhưng overfit sớm trên các task held-out dài hơn (GPT, MLP với T=3000, CNN batch 512), nơi nó thua Adam. Mỗi bước của nó cũng tốn khoảng 3 lần Adam. Ngược lại, rule NAdam + cosine của R3 (blind) thắng Adam trên cả 5 task held-out.
+- **Hạn chế chính.** Mỗi cấu hình chỉ có 1 run; task nhỏ, horizon ngắn; speedup tính theo số bước (mục 7.3, 9).
 
 ## 1. Bối cảnh và câu hỏi nghiên cứu
 
@@ -1129,6 +1130,7 @@ class UpdateRule:
   3. #225 (e2): Shampoo² với damping 1e-4. Fitness −0.302, thắng Shampoo trên cả 4 task.
 - **Cùng một ý tưởng, hai số phận.** Số mũ −1/2 đã được thử từ mẫu #17 và #33, đều do e1 viết lại từ đầu, và cả hai đều fail khi chấm. Ý tưởng chỉ thành công khi đến dưới dạng một thay đổi nhỏ (m1) trên một bản Shampoo đã chạy tốt. Đây đúng là tình huống "bài toán đánh lừa" của R3 (mục 4.3): ý tưởng bậc hai cần một bản cài đặt tốt mới thể hiện được, và seed cung cấp đúng thứ đó.
 - **Quần thể cuối chỉ còn preconditioner ma trận:** 8 biến thể Shampoo (4 cái đứng đầu đều dùng số mũ −1/2) và 8 biến thể Muon; không còn rule đường chéo nào, và cả 5 seed đều đã bị thay. Tính trên toàn run thì khác: 38% mẫu vẫn là rule đường chéo (hậu duệ của các seed R3) và 42% là biến thể Muon. Biến thể Shampoo chỉ chiếm 13% số mẫu, nhưng cho mọi kết quả tốt nhất.
+- **Kiểm định (mục 7.2–7.3).** Trên seed mới, R4#1 thắng Adam ×1.6–3.4 theo số bước ở cả 4 task search. Nhưng nó overfit sớm trên các task held-out dài hơn, và mỗi bước tốn khoảng 3 lần Adam.
 - **Nối với NGD.** Theo P4, Shampoo gốc $\approx F^{-1/2}$ ("căn bậc hai" của NGD Kronecker, như Adam với diag-NGD), còn Shampoo² $\approx F^{-1}$, tức NGD Kronecker, gần K-FAC (Morwani et al., 2024). EoH đã tự đi đúng bước đó, và lợi ích lớn nhất rơi vào bài softmax đã xoay, nơi NGD trùng với Newton. Đây là lần thứ hai EoH "nâng số mũ" từ căn bậc hai lên bậc một: lần đầu là R1, từ Adam ($m/\sqrt v$) sang $m/v$ (mục 4.1, 8.1). Mục 8.3 kiểm chứng bằng đo đạc trực tiếp.
 
 <details>
@@ -1582,7 +1584,7 @@ Mục 8.1–8.2 đo các rule này so với NGD.
 | Weight decay | không | ≤ 2% mẫu ở mọi run |
 | Clipping, chặn bước | có | 11/16 rule cuối của R2 |
 | Chuẩn hóa theo layer | thử nhưng không thắng | 29% mẫu R3, 0/16 rule cuối |
-| Preconditioner Kronecker / trực giao | không tự tìm ra; khi có seed thì cải tiến được | 2% mẫu R3, đều thua Adam; R4: 16/16 rule cuối, best −0.302 so với −0.180 của Shampoo |
+| Preconditioner Kronecker / trực giao | không tự tìm ra; khi có seed thì cải tiến được, nhưng tổng quát hóa kém ra task dài | 2% mẫu R3, đều thua Adam; R4: 16/16 rule cuối, best −0.302 so với −0.180 của Shampoo; overfit trên task held-out dài (mục 7.2) |
 | Preconditioner "bậc một" thay cho "căn bậc hai" (gần NGD hơn) | có, hai lần | R1: $m/\sqrt v \to m/v$ ($k=+1$); R4: Shampoo $\to$ Shampoo² |
 
 ## 6. Tune kết quả: ablation và polish theo kiểu memetic
@@ -2014,11 +2016,23 @@ Lr được tune bằng seed 0. Các seed dùng để báo cáo (1–5, hoặc 1
 **Bộ task R3 held-out:** ResNet-18, GPT 6 lớp, MLP với T=3000, CNN với batch 512, softmax đã xoay với T=2000.
 
 <!-- BEGIN:bench_r3_transfer -->
-_(chưa có dữ liệu: chạy bước tương ứng trong `scripts/run_pipeline.sh`)_
+| optimizer | ResNet-18 / CIFAR-10 (T=2000) | small GPT / Shakespeare (T=2000) | MLP / F-MNIST (T=3000) | CNN / CIFAR-10, batch 512 (T=1000) | softmax, rotated (T=2000) |
+|---|---|---|---|---|---|
+| Adam | +0.000 ± 0.000 (×1.00) | +0.000 ± 0.000 (×1.00) | +0.000 ± 0.000 (×1.00) | +0.000 ± 0.000 (×1.00) | +0.000 ± 0.000 (×1.00) |
+| AdamW + cosine | -0.092 ± 0.017 (×1.25) | -0.020 ± 0.002 (×1.02) | -0.014 ± 0.006 (×1.17) | -0.035 ± 0.007 (×1.52) | -0.076 ± 0.005 (×1.61) |
+| SGD + cosine | +0.006 ± 0.010 (×1.00) | +0.206 ± 0.005 (never) | +0.006 ± 0.004 (×1.12) | +0.026 ± 0.039 (×1.18) | -0.184 ± 0.005 (×2.05) |
+| Lion + cosine | -0.097 ± 0.018 (×1.34) | +0.114 ± 0.001 (×0.45) | +0.046 ± 0.006 (×1.07) | +0.054 ± 0.022 (never) | -0.471 ± 0.003 (×4.69) |
+| Muon + cosine | -0.280 ± 0.014 (×2.53) | +0.166 ± 0.005 (×1.90) | +0.034 ± 0.020 (never) | -0.066 ± 0.012 (×2.58) | -0.284 ± 0.003 (×2.43) |
+| Shampoo + cosine | -0.200 ± 0.004 (×1.68) | +0.083 ± 0.012 (×1.63) | -0.028 ± 0.007 (×1.11) | -0.065 ± 0.008 (×2.50) | -0.438 ± 0.004 (×3.79) |
+| R3 best | -0.146 ± 0.005 (×1.37) | -0.014 ± 0.003 (×1.02) | -0.048 ± 0.006 (×1.21) | -0.057 ± 0.014 (×1.60) | -0.285 ± 0.002 (×1.97) |
+| R3 #2 | -0.124 ± 0.006 (×1.36) | +0.009 ± 0.003 (×0.78) | -0.045 ± 0.003 (×1.26) | -0.069 ± 0.014 (×1.85) | -0.303 ± 0.003 (×2.37) |
+| R3 #3 | -0.135 ± 0.006 (×1.36) | -0.007 ± 0.004 (×1.04) | -0.040 ± 0.003 (×1.13) | -0.056 ± 0.022 (×1.60) | -0.264 ± 0.002 (×1.97) |
+| R3 best, polished | -0.139 ± 0.008 (×1.37) | -0.004 ± 0.004 (×1.12) | -0.036 ± 0.006 (×1.12) | -0.085 ± 0.009 (×1.93) | -0.275 ± 0.001 (×1.91) |
+| R4 best | – | +0.138 ± 0.114 (never) | +0.043 ± 0.011 (never) | +0.017 ± 0.023 (never) | -0.629 ± 0.006 (×6.57) |
 <!-- END:bench_r3_transfer -->
 
 <!-- BEGIN:curves_r3_transfer -->
-_(chưa có dữ liệu: chạy bước tương ứng trong `scripts/run_pipeline.sh`)_
+![r3_transfer](figures/loss_r3_transfer.png)
 <!-- END:curves_r3_transfer -->
 
 **Nhận xét:**
@@ -2026,7 +2040,30 @@ _(chưa có dữ liệu: chạy bước tương ứng trong `scripts/run_pipelin
 - **R3 thắng baseline best practice đường chéo.** Rule của R3 thắng AdamW + warmup + cosine trên cả 4 task, và thắng cả Lion, SGD có cosine. R3 best đã polish đạt −0.230 / −0.075 / −0.063 / −0.027, so với −0.026 / −0.015 / −0.013 / −0.008 của AdamW+cosine.
 - **Nhưng R3 thua preconditioner ma trận đúng ở chỗ ma trận có lợi.** Trên softmax đã xoay, Shampoo đạt −0.318 (×2.0). Trên CNN, Muon đạt −0.248 (×2.6) và Shampoo −0.220. Riêng char-Transformer, R3 polished (−0.027, ×1.35) ngang Shampoo (−0.029, ×1.35) và hơn Muon (−0.003).
 - **R4 thắng mọi baseline trên seed mới.** R4#1 (Shampoo²) đạt −0.706 / −0.140 / −0.296 / −0.054, nhanh hơn Adam ×2.7 / ×3.4 / ×3.0 / ×1.6, và hơn Shampoo (−0.318 / −0.099 / −0.220 / −0.029) ở cả 4 task. Hai rule tiếp theo của R4, cùng họ Shampoo², cho kết quả tương tự. Lợi thế lớn nhất vẫn ở softmax đã xoay: mức cải thiện so với Adam gấp hơn 2 lần của Shampoo.
-- <!-- R4_TRANSFER -->
+- **Nhưng Shampoo² của R4 tổng quát hóa kém ra ngoài các task ngắn của search.** Trên softmax đã xoay với T=2000, nó vẫn nhanh nhất (−0.629, ×6.6; Shampoo −0.438). Nhưng trên GPT (+0.14), MLP với T=3000 (+0.04) và CNN batch 512 (+0.02), nó thua Adam và không bao giờ đạt loss cuối của Adam. (ResNet-18 không được chạy cho R4, xem `validate_r4`.)
+  - Đường loss cho thấy lý do. Trên MLP và CNN, đây là **overfit** chứ không phải mất ổn định: validation loss của R4 giảm nhanh hơn Adam ở đầu run, rồi *đi lên* từ khoảng 1/4–1/3 horizon. Mức thấp nhất nó đạt được cũng cao hơn Adam: MLP 0.35–0.37 so với 0.33–0.34, CNN 0.81–0.82 so với 0.75–0.77. Trên GPT, R4 còn có một cú vọt loss ngay sau warmup, và một trong ba seed bị kẹt lâu ở loss cao (std ±0.11).
+  - Các task của search chỉ dài 150–400 bước nên chưa có overfit, và fitness không phạt điều này. Preconditioner gần NGD học nhanh hơn, nên khi không có regularization nó overfit sớm hơn; regularization lại đúng là thứ EoH không tìm ra (nhóm 4). Điều này khớp với các kết quả đã biết: preconditioning kiểu NGD và adaptive method có thể làm hại generalization (Wilson et al., 2017; Amari et al., 2021).
+  - Shampoo và Muon gốc cũng overfit mạnh trên GPT (+0.08 và +0.17); trên GPT chỉ các rule đường chéo (AdamW, R3) không thua Adam.
+- **Rule của R3 thì tổng quát hóa tốt nhất bảng.** R3 best thắng Adam trên cả 5 task held-out (ResNet-18 −0.15, GPT −0.01, MLP T=3000 −0.05, CNN batch 512 −0.06, softmax xoay T=2000 −0.29). Nó không bao giờ thua xa Adam, trong khi các baseline ma trận thì có. Ở từng task riêng thì baseline ma trận vẫn dẫn: Muon trên ResNet-18 (−0.28, ×2.5), Lion và Shampoo trên softmax xoay dài (−0.47 và −0.44).
+
+### 7.3 Chi phí thời gian thực mỗi bước
+
+Fitness và speedup ở trên đếm *số bước*. Bảng dưới đo thời gian thực của một bước (gồm forward, backward và update) trên GPU rảnh, bằng `analysis/step_cost.py` (60 bước sau 3 bước khởi động). Trong ngoặc là tỉ lệ so với Adam.
+
+<!-- BEGIN:step_cost -->
+| optimizer | MLP / F-MNIST (T=400) | CNN / CIFAR-10 (T=200) | small GPT / Shakespeare (T=2000) |
+|---|---|---|---|
+| Adam | 1.9 (×1.0) | 2.3 (×1.0) | 24.3 (×1.0) |
+| AdamW + cosine | 2.0 (×1.0) | 2.5 (×1.1) | 25.2 (×1.0) |
+| Muon + cosine | 2.8 (×1.4) | 3.8 (×1.6) | 30.3 (×1.2) |
+| Shampoo + cosine | 3.7 (×1.9) | 4.6 (×2.0) | 52.8 (×2.2) |
+| R3 best | 1.6 (×0.8) | 1.7 (×0.7) | 24.3 (×1.0) |
+| R4 best | 5.3 (×2.7) | 6.8 (×2.9) | 79.2 (×3.3) |
+<!-- END:step_cost -->
+
+- **Rule của R4 tốn 2.7–3.3 lần Adam mỗi bước**, Shampoo 1.9–2.2 lần, Muon 1.2–1.6 lần; rule của R3 ngang Adam.
+- **Quy ra thời gian thực**, lợi thế ×3.4 và ×3.0 theo số bước của R4 trên MLP và CNN (mục 7.2) chỉ còn khoảng ×1.2 và ×1.0. Muon trên CNN còn khoảng ×1.6, và R3 giữ nguyên lợi thế của mình.
+- **Lưu ý:** các model ở đây nhỏ, nên thời gian mỗi bước chủ yếu là overhead gọi kernel. Với model lớn, chi phí `eigh` tăng theo bậc ba kích thước ma trận, nên các tỉ lệ này chỉ mang tính tham khảo.
 
 ## 8. Nối với NGD bằng thực nghiệm
 
@@ -2288,12 +2325,13 @@ R4 là phép thử ngược. Với cùng ý tưởng số mũ −1/2, các bản
 - Một số rule tiến hóa *có* tính chất của NGD đường chéo. Rule của R1 có $k=+1$, tức bất biến với scale đường chéo, và tính chất này đi kèm tốc độ trên bài có Fisher gần đường chéo.
 - Nhưng không rule element-wise nào vượt được trần của xấp xỉ đường chéo: cosine với full NGD ngang Adam, và rotation penalty ngang hoặc lớn hơn diag-NGD.
 - Preconditioner Kronecker không bị trần đó, vì chúng đẳng biến với phép xoay đầu vào (P4). Bước EoH tự làm ở R4 (Shampoo → Shampoo²) chính là bước đi từ "căn bậc hai" sang NGD Kronecker. Số đo cụ thể ở mục 8.3.
+- **Gần NGD hơn thì tối ưu nhanh hơn, nhưng không tự tổng quát hóa tốt hơn.** Shampoo² học nhanh nhất rồi overfit sớm nhất trên các task held-out dài (mục 7.2), đúng với cảnh báo trong literature về preconditioning và generalization (Wilson et al., 2017; Amari et al., 2021). Tốc độ tối ưu và generalization phải được đo riêng; fitness của ta, chỉ gồm các task ngắn, chỉ đo cái thứ nhất.
 
 **Hạn chế:**
 
 - Mỗi cấu hình chỉ có 1 run EoH. Error bar trong bảng là theo seed huấn luyện, không theo seed của search, nên chênh lệch giữa các run có thể một phần là nhiễu.
 - Task nhỏ và horizon ngắn (150–3000 bước). Kết luận về Transformer lớn hay LLM chưa kiểm được; GPT 6 lớp đã cho thấy rule tìm được tổng quát kém sang Transformer.
-- **Speedup tính theo số bước, không theo thời gian thực.** Shampoo và các biến thể của R4 tốn hơn Adam nhiều lần mỗi bước. Rule tốt nhất của R4 tính `eigh` mỗi 5 bước và không giới hạn kích thước ma trận. Trên ResNet-18 nó phải phân rã ma trận 4608×4608, nên không được đưa vào kiểm định held-out trên ResNet-18. <!-- STEP_COST -->
+- **Speedup tính theo số bước, không theo thời gian thực.** Shampoo và các biến thể của R4 tốn hơn Adam nhiều lần mỗi bước. Rule tốt nhất của R4 tính `eigh` mỗi 5 bước và không giới hạn kích thước ma trận. Trên ResNet-18 nó phải phân rã ma trận 4608×4608, nên không được đưa vào kiểm định held-out trên ResNet-18. Đo trên GPU rảnh, mỗi bước của nó tốn 2.7–3.3 lần Adam (mục 7.3).
 - Lr của mọi rule được tune trên lưới thô (7 + 3 giá trị), nên rule nhạy với lr bị thiệt hơn.
 - LLM đã biết các optimizer phổ biến từ dữ liệu huấn luyện. "Tái phát hiện" ở đây là truy hồi và ghép lại, không phải phát minh từ đầu.
 - Sự cố ở R2 (khoảng 290 mẫu fail oan) và task description của R3 ghi sai khoảng T.
@@ -2303,7 +2341,7 @@ R4 là phép thử ngược. Với cùng ý tưởng số mũ −1/2, các bản
 
 1. **EoH là công cụ tốt để tái tổ hợp tri thức optimizer có sẵn trong LLM.** Với khoảng 1–1.5 giờ cho mỗi run trên hai GPU, nó tìm lại phần lớn best practice và ghép chúng thành rule nhanh hơn Adam đã tune trên đúng các task được chọn.
 2. **Thứ EoH tìm ra phản ánh hàm fitness và bộ task nhiều hơn là một "chân lý" về optimizer.** Đổi fitness (R1 → R2) hay đổi không gian tìm kiếm (R2 → R3) đều làm đổi loại rule nổi lên. Kiểm định trên seed mới và task held-out là bắt buộc.
-3. **Về NGD, hướng đi của EoH nhất quán với lý thuyết.** Khi được phép, nó dịch preconditioner về phía NGD (bậc một thay vì căn bậc hai), và lợi ích lớn nhất xuất hiện đúng nơi NGD mạnh nhất: bài ill-conditioned, nơi NGD trùng với Newton. Nhưng bước nhảy từ đường chéo sang ma trận không tự xảy ra trong ngân sách của ta; nó cần seed.
+3. **Về NGD, hướng đi của EoH nhất quán với lý thuyết.** Khi được phép, nó dịch preconditioner về phía NGD (bậc một thay vì căn bậc hai), và lợi ích lớn nhất xuất hiện đúng nơi NGD mạnh nhất: bài ill-conditioned, nơi NGD trùng với Newton. Nhưng bước nhảy từ đường chéo sang ma trận không tự xảy ra trong ngân sách của ta; nó cần seed. Và nhanh hơn trên task ngắn không đồng nghĩa với tốt hơn: thiếu regularization, Shampoo² overfit sớm trên task dài, trong khi rule NAdam + cosine của R3 tổng quát hóa tốt hơn.
 4. **Hướng tiếp theo:**
    - giữ chỗ cho từng nhóm cơ chế (niching), và phản hồi lỗi cho LLM;
    - fitness tính theo thời gian thực thay vì số bước;
@@ -2331,7 +2369,7 @@ bash scripts/run_pipeline.sh search_r2 polish validate       # R2; polish and va
 bash scripts/run_pipeline.sh search_r3 r3 validate_r3        # R3 (blind, per tensor) and its validation
 bash scripts/run_pipeline.sh search_r4 r4 validate_r4        # R4 (seeded)
 SUBSAMPLE=200 bash scripts/run_pipeline.sh population        # population analysis of R1
-bash scripts/run_pipeline.sh report
+bash scripts/run_pipeline.sh step_cost report                # ms per step (idle GPU), then this report
 ```
 
-Tham khảo: Amari (1998); Martens & Grosse (2015) *K-FAC*; Gupta, Koren & Singer (2018) *Shampoo*; Martens (2020); Kunstner et al. (2019); Zhang, Martens & Grosse (2019); Morwani et al. (2024) *A new perspective on Shampoo's preconditioner*; Bernstein & Newhouse (2024) *Old optimizer, new norm* (Muon); Chen et al. (2023) *Lion*; Loshchilov & Hutter (2019) *AdamW*; van der Sluis (1969); Romera-Paredes et al. (2024) *FunSearch*; Ye et al. (2024) *ReEvo*; Zheng et al. (2025) *MCTS-AHD*; van Stein & Bäck (2025) *LLaMEA*; Mouret & Clune (2015) *MAP-Elites*.
+Tham khảo: Amari (1998); Martens & Grosse (2015) *K-FAC*; Gupta, Koren & Singer (2018) *Shampoo*; Martens (2020); Kunstner et al. (2019); Zhang, Martens & Grosse (2019); Morwani et al. (2024) *A new perspective on Shampoo's preconditioner*; Bernstein & Newhouse (2024) *Old optimizer, new norm* (Muon); Chen et al. (2023) *Lion*; Loshchilov & Hutter (2019) *AdamW*; van der Sluis (1969); Romera-Paredes et al. (2024) *FunSearch*; Ye et al. (2024) *ReEvo*; Zheng et al. (2025) *MCTS-AHD*; van Stein & Bäck (2025) *LLaMEA*; Mouret & Clune (2015) *MAP-Elites*; Wilson et al. (2017) *The marginal value of adaptive gradient methods in machine learning*; Amari et al. (2021) *When does preconditioning help or hurt generalization?*.

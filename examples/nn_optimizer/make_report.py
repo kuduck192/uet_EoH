@@ -11,6 +11,7 @@ Expected inputs in --adir (missing ones leave a placeholder in the report):
     invariance*.json                          analysis/invariance.py           (all files merged)
     ngd_alignment*.json                       analysis/ngd_alignment.py --rules (all files merged)
     population_corr.json                      analysis/population.py
+    step_cost.json                            analysis/step_cost.py
     ablate_R1_1/{importance.md,minimal.py,trace.json}   analysis/ablate.py
     polish_<name>/{trace.json,<name>_polished.py}       analysis/polish.py
 """
@@ -302,7 +303,11 @@ def fig_loss_curves(data, name, title, featured, baselines):
     for ax in list(axes.flat)[len(tasks):]:
         ax.axis("off")
     axes[0][0].set_ylabel(f"{'validation' if val else 'training'} loss (seed mean, smoothed)")
-    handles, labels = axes[0][0].get_legend_handles_labels()
+    legend = {}  # from every panel: a rule may not have been run on the first task
+    for ax in axes.flat:
+        for h, lab in zip(*ax.get_legend_handles_labels()):
+            legend.setdefault(lab, h)
+    handles, labels = list(legend.values()), list(legend)
     fig.legend(handles, labels, loc="upper center", ncol=len(labels), frameon=False, fontsize=8)
     fig.tight_layout(rect=(0, 0, 1, 0.92))
     fig.savefig(os.path.join(FIG_DIR, name), dpi=150)
@@ -572,6 +577,15 @@ def polish_block(adir):
     return "\n\n".join(parts) or None
 
 
+def step_cost_table(data):
+    """Milliseconds per training step and the ratio to Adam (the first rule measured)."""
+    tasks = list(next(iter(data.values())).keys())
+    ref = data.get("adam_t") or next(iter(data.values()))
+    rows = [[plotstyle.label(name)] + [f"{1000 * v[t]:.1f} (×{v[t] / ref[t]:.1f})" for t in tasks]
+            for name, v in data.items()]
+    return md_table(["optimizer"] + [TASK_LABELS.get(t, t) for t in tasks], rows)
+
+
 def _deep_update(dst, src, depth):
     for k, v in src.items():
         if depth > 1 and isinstance(v, dict) and isinstance(dst.get(k), dict):
@@ -674,6 +688,8 @@ def main():
     blocks["population"] = population_table(pop) if pop else None
     blocks["ablation"] = ablation_block(args.adir, "R1")
     blocks["polish"] = polish_block(args.adir)
+    cost = _load(A("step_cost.json"))
+    blocks["step_cost"] = step_cost_table(cost) if cost else None
     blocks["groups"] = groups_table(runs)
 
     fill(args.report, blocks)

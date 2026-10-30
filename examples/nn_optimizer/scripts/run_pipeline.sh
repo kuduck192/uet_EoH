@@ -3,7 +3,8 @@
 # (scripts/serve_llm.sh) must be up on GPU 0 for the probe/smoke/search stages.
 #
 #   bash scripts/run_pipeline.sh data selftest calibrate probe search analysis
-#   bash scripts/run_pipeline.sh search_r2 search_r3 polish validate r3 validate_r3 search_r4 r4 validate_r4 report
+#   bash scripts/run_pipeline.sh search_r2 search_r3 polish validate r3 validate_r3 search_r4 r4 validate_r4 \
+#       step_cost report
 #
 # "analysis" = motifs bench ablate ngd population (each can also be run alone; RUN=R2 for R2).
 set -e
@@ -139,6 +140,12 @@ stage_validate_r4() {
         --metric val --seeds 3 --seed-offset 1 --workers ${WORKERS:-4} --out "$A/eval_r3_transfer-R4.json"
     $PY analysis/ngd_alignment.py --rules $RULES --no-full-ngd --tasks softmax_illcond_rot tiny_fmnist \
         --out "$A/ngd_alignment_r4.json"
+}
+stage_step_cost() {
+    # Wall-clock cost per step; run on an otherwise idle GPU.
+    $PY analysis/step_cost.py --rules baseline:adam_t baseline:adamw_cosine baseline:muon_cosine \
+        baseline:shampoo_cosine evolved:R3:1 evolved:R4:1 --tasks mlp_fmnist_v cnn_cifar_v gpt_v --steps 60 \
+        --out "$A/step_cost.json"
 }
 stage_analysis() { stage_motifs; stage_bench; stage_ablate; stage_ngd; stage_population; }
 stage_report() { $PY make_report.py; }
