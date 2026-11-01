@@ -1,5 +1,5 @@
 # Environment shared by the nn_optimizer scripts:  source scripts/env.sh
-# GPU 0 serves the LLM (serve_llm.sh), GPU 1 runs every experiment.
+# GPU 0 serves the local LLM (serve_llm.sh; not needed for Claude runs), GPU 1 runs every experiment.
 NNOPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export NNOPT_ROOT
 export PY=/mnt/data/duclm3/venvs/pytorch-latest/bin/python
@@ -13,3 +13,5 @@ export NNOPT_DATA=/dev/shm/nnopt_data          # copy of $NNOPT_ROOT/data on tmp
 export CUDA_VISIBLE_DEVICES=1
 export OMP_NUM_THREADS=2
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# ANTHROPIC_API_KEY (runs with --model claude-*) lives in the repo-root .env (chmod 600, gitignored); never echo it.
+if [ -f "$NNOPT_ROOT/../../.env" ]; then source "$NNOPT_ROOT/../../.env"; fi

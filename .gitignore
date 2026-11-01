@@ -14,3 +14,8 @@ examples/nn_optimizer/baselines_*.json
 examples/nn_optimizer/analysis_out/
 # NFS placeholders of files deleted while still open
 .nfs*
+# local secrets (API keys): never commit
+.env
+# kv_eviction: GPU-worker file queue (duplicates of evaluated programs) and worker stop flag
+examples/kv_eviction/runs/queue/
+examples/kv_eviction/runs/STOP_WORKERS

@@ -14,12 +14,17 @@ logger = logging.getLogger('eoh')
 
 
 class InterfaceLLM:
-    def __init__(self, api_endpoint, api_key, model, use_local, local_url, timeout=60, extra_body=None):
+    def __init__(self, api_endpoint, api_key, model, use_local, local_url, timeout=60, extra_body=None,
+                 provider="openai", usage_log=None):
         if use_local:
             if not local_url:
                 raise ValueError("local_url must be set when use_local=True")
             self.llm = InterfaceLocalLLM(local_url, timeout=timeout)
             logger.info("LLM: local @ %s", local_url)
+        elif provider == "anthropic":
+            from .api_anthropic import InterfaceAnthropic  # optional dependency
+            self.llm = InterfaceAnthropic(model, timeout=timeout, params=extra_body, usage_log=usage_log)
+            logger.info("LLM: %s @ Anthropic API", model)
         else:
             if not api_key or not api_endpoint:
                 raise ValueError("api_endpoint and api_key must be set for remote LLM")

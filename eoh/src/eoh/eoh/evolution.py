@@ -150,6 +150,8 @@ class Evolution:
             config.llm.local_url,
             timeout=config.llm.timeout,
             extra_body=config.llm.extra_body,
+            provider=config.llm.provider,
+            usage_log=config.llm.usage_log,
         )
 
     # ── prompt builders ───────────────────────────────────────────────────────

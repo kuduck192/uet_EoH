@@ -115,7 +115,7 @@ class EOH:
         for line in [
             "=" * 54,
             "  EoH",
-            f"  LLM      : {llm.model} @ {llm.api_endpoint}",
+            f"  LLM      : {llm.model} @ {'Anthropic API' if llm.provider == 'anthropic' else llm.api_endpoint}",
             f"  EC       : gen={self.n_pop}  pop={self.pop_size}  ops=[{ops}]",
             f"  Sampling : init={init_n} (2×pop)  evo_budget={budget}",
             f"  Pipeline : samplers={self.num_samplers}  evaluators={self.num_evaluators} (async)",

@@ -17,9 +17,16 @@ class LLMConfig:
     use_local: bool = False
     local_url: str = None
     timeout: int = 180
-    # Extra fields merged into the chat-completions request body, e.g.
-    # {"temperature": 0.8, "chat_template_kwargs": {"enable_thinking": False}}.
+    # Extra fields merged into the request body, e.g. for chat completions
+    # {"temperature": 0.8, "chat_template_kwargs": {"enable_thinking": False}}, or for
+    # provider="anthropic" {"max_tokens": 16000, "output_config": {"effort": "low"}}.
     extra_body: dict = None
+    # "openai": OpenAI-compatible chat completions at api_endpoint (vLLM, DeepSeek, ...);
+    # "anthropic": Claude via the Anthropic Messages API, key from ANTHROPIC_API_KEY
+    # (api_endpoint and api_key are then unused).
+    provider: str = "openai"
+    # provider="anthropic" only: JSON-lines file receiving the token usage of every call.
+    usage_log: str = None
 
 
 @dataclass

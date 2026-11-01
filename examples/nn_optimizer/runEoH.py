@@ -21,6 +21,11 @@ On the GPU server (LLM on GPU 0, evaluations on GPU 1; see scripts/):
     python prepare_data.py && python prob.py --calibrate
     python runEoH.py --run R1 --model qwen3.8-27b --deadline-min 210
 
+With Claude instead of the local server (no LLM GPU; the key comes from the repo-root
+.env, which scripts/env.sh sources; token usage goes to results/llm_usage.jsonl):
+
+    python runEoH.py --run R1 --model claude-haiku-5-5 --effort low --tag haiku --deadline-min 150
+
 Outputs go to runs/<run>[_<tag>]/results/{pops,pops_best,samples,eval_log/,run_log.txt}.
 To resume, start a new --tag with --continue-from <population json> and
 --max-samples set to the remaining budget (EoH restarts its sample numbering).
@@ -105,13 +110,21 @@ def main():
     ap.add_argument("--run", choices=RUNS, default="R1")
     ap.add_argument("--tag", default="", help="suffix for repeated or resumed runs, e.g. smoke")
     ap.add_argument("--endpoint", default=os.environ.get("LLM_ENDPOINT", "http://127.0.0.1:8000"))
-    ap.add_argument("--model", default=os.environ.get("LLM_MODEL"), help="model name as served by vLLM")
+    ap.add_argument("--model", default=os.environ.get("LLM_MODEL"),
+                    help="model name as served by vLLM, or a Claude model id (claude-haiku-5-5)")
+    ap.add_argument("--provider", choices=["openai", "anthropic"], default=None,
+                    help="default: anthropic for claude-* models, else the OpenAI-compatible --endpoint")
+    ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], default="low",
+                    help="Claude only: output_config.effort, the depth of its adaptive thinking")
     ap.add_argument("--api-key", default="EMPTY")
+    # Sampling and thinking flags apply to the OpenAI-compatible server only (Claude Haiku 5.5
+    # rejects non-default sampling parameters).
     ap.add_argument("--thinking", action="store_true", help="enable Qwen thinking mode")
     ap.add_argument("--temperature", type=float, default=0.7)
     ap.add_argument("--top-p", type=float, default=0.8)
     ap.add_argument("--top-k", type=int, default=20)
-    ap.add_argument("--max-tokens", type=int, default=4096, help="cap on generated tokens (incl. reasoning)")
+    ap.add_argument("--max-tokens", type=int, default=None,
+                    help="cap on generated tokens incl. reasoning (default 4096, Claude 16000)")
     ap.add_argument("--pop-size", type=int, default=10)
     ap.add_argument("--max-samples", type=int, default=600)
     ap.add_argument("--samplers", type=int, default=12)
@@ -125,6 +138,8 @@ def main():
     args = ap.parse_args()
     if not args.model:
         ap.error("--model is required (or set LLM_MODEL)")
+    args.provider = args.provider or ("anthropic" if args.model.startswith("claude") else "openai")
+    args.max_tokens = args.max_tokens or (16000 if args.provider == "anthropic" else 4096)
 
     cfg = RUNS[args.run]
     out_dir = os.path.join(HERE, "runs", args.run + (f"_{args.tag}" if args.tag else ""))
@@ -146,15 +161,19 @@ def main():
         with open(seed_path, "w") as f:
             json.dump(seeds, f, indent=2)
 
-    extra_body = {
-        "temperature": args.temperature,
-        "top_p": args.top_p,
-        "top_k": args.top_k,
-        "max_tokens": args.max_tokens,
-        "chat_template_kwargs": {"enable_thinking": args.thinking},
-    }
+    if args.provider == "anthropic":
+        extra_body = {"max_tokens": args.max_tokens, "output_config": {"effort": args.effort}}
+    else:
+        extra_body = {
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "top_k": args.top_k,
+            "max_tokens": args.max_tokens,
+            "chat_template_kwargs": {"enable_thinking": args.thinking},
+        }
     llm = LLMConfig(api_endpoint=args.endpoint, api_key=args.api_key, model=args.model,
-                    timeout=900 if args.thinking else 300, extra_body=extra_body)
+                    timeout=900 if args.thinking else 300, extra_body=extra_body, provider=args.provider,
+                    usage_log=os.path.join(out_dir, "results", "llm_usage.jsonl"))
 
     task = NNOptimizerSearch(
         use_fisher=cfg["use_fisher"],
