@@ -2,7 +2,11 @@
 fill the <!-- BEGIN:x --> ... <!-- END:x --> blocks of report/REPORT.md (the
 prose around them is left untouched, so this can be re-run at any time).
 
-    python make_report.py [--runs R1 R2 R3 R4] [--adir analysis_out]
+    python make_report.py [--runs R1 R1_haiku ... R4] [--adir analysis_out] [--llm-adir analysis_out/haiku]
+
+Two backbones side by side: the SLM (Qwen3.8-27B, runs R1-R4) and the LLM (Claude Haiku 5.5, runs
+R1_haiku-R3_haiku). The LLM's rules are evaluated into merged copies of the SLM's files in --llm-adir
+(scripts/validate_haiku.sh): the tables take the baselines and SLM rows from --adir and add the LLM rows.
 
 Expected inputs in --adir (missing ones leave a placeholder in the report):
     eval_search.json, eval_transfer.json      evaluation/transfer.py (--merge-into adds rules)
@@ -20,6 +24,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 from collections import Counter
 
@@ -49,10 +54,30 @@ TASK_LABELS = {
     "mlp_fmnist_long_v": "MLP / F-MNIST (T=3000)", "cnn_cifar_bs512_v": "CNN / CIFAR-10, batch 512 (T=1000)",
     "softmax_rot_long_v": "softmax, rotated (T=2000)",
 }
-CURVE_BASELINES = {"search": ["adam_ref", "sgd_momentum", "diag_ngd_emp"],
-                   "r3": ["adam_ref", "adamw_cosine", "muon_cosine", "shampoo_cosine"]}
-CURVE_BASELINES.update(transfer=CURVE_BASELINES["search"], r3_transfer=CURVE_BASELINES["r3"])
-SETTING_RUNS = {"search": ("R1", "R2"), "transfer": ("R1", "R2"), "r3": ("R3", "R4"), "r3_transfer": ("R3", "R4")}
+RUNS = ["R1", "R1_haiku", "R2", "R2_haiku", "R3", "R3_haiku", "R4"]  # each SLM run next to its LLM twin
+API_PRICE = {"claude-haiku-5-5": (0.10, 0.50)}  # USD per million input / output tokens, prompts up to 100K tokens
+# Curves of one SLM and one LLM rule per panel, next to Adam and one baseline. Palette slots were checked
+# pairwise per row with the data-viz palette validator; LLM rules are dash-dot as a second cue.
+CURVE_ROWS = {
+    "elementwise": ([["adam_ref", "R1#1", "R1_haiku#1"], ["adam_ref", "R2#1", "R2_haiku#1"]], ["R1", "R2"]),
+    "tensor": ([["adam_ref", "shampoo_cosine", "R3#1", "R3_haiku_1_tolerant"],
+                ["adam_ref", "muon_cosine", "R4#1", "R3_haiku_1_tolerant"]], ["R3 (blind)", "SLM-R4 (seeded)"]),
+}
+CURVE_SETTING = {"search": "elementwise", "transfer": "elementwise", "r3": "tensor", "r3_transfer": "tensor"}
+SLOT = {"R1#1": 0, "R1_haiku#1": 2, "R2#1": 3, "R2_haiku#1": 7, "shampoo_cosine": 0, "R3#1": 4,
+        "R3_haiku_1_tolerant": 2, "muon_cosine": 3, "R4#1": 6, "R1": 0, "R1_haiku": 2, "R2": 3, "R2_haiku": 7,
+        "R3": 4, "R3_haiku": 2, "R4": 6}
+
+
+def run_label(run):
+    return f"LLM-{run[:-len('_haiku')]}" if run.endswith("_haiku") else f"SLM-{run}"
+
+
+def _style(name, llm):
+    """(colour, linestyle) of a rule or run in the backbone figures; Adam stays the neutral dashed reference."""
+    if plotstyle._canon(name) == "adam":
+        return plotstyle.INK2, "--"
+    return plotstyle.SERIES[SLOT[name]], ("-." if llm else "-")
 
 
 def _load(path):
@@ -105,6 +130,10 @@ def run_stats(run):
     seeds = {s["code"]: s["name"] for s in load_seeds(run)}
     best_pop = pop[0]
     return {
+        "Backbone": (f"LLM: `{cfg['model']}` via the API, effort {cfg.get('effort')}, adaptive thinking"
+                     if cfg.get("provider") == "anthropic" else
+                     f"SLM: `{cfg.get('model', '?')}` on local vLLM, thinking {'on' if cfg.get('thinking') else 'off'}, "
+                     f"T={cfg.get('temperature')}, top-p={cfg.get('top_p')}"),
         "Fitness optimised": ("robust (mean + worst-task excess)" if cfg.get("aggregate") == "robust"
                               else "mean over tasks")
                              + (", validation loss" if cfg.get("metric") == "val" else ", training loss"),
@@ -113,8 +142,6 @@ def run_stats(run):
         "Initial population": _init_description(run, cfg, samples),
         "Population management": (f"pop {cfg.get('pop_size')}, max {cfg['skeleton_cap']} per code skeleton"
                                   if cfg.get("skeleton_cap") else f"pop {cfg.get('pop_size')}, EoH default"),
-        "LLM": f"`{cfg.get('model', '?')}`, thinking {'on' if cfg.get('thinking') else 'off'}, "
-               f"T={cfg.get('temperature')}, top-p={cfg.get('top_p')}",
         "Samples (valid)": f"{len(samples)} ({len(valid)}, {100 * len(valid) / len(samples):.0f}%)",
         "Per operator (valid/total)": ", ".join(f"{op} {ops_ok[op]}/{ops[op]}" for op in sorted(ops)),
         "Best by own fitness": f"{best['objective']:+.4f} (#{best['sample_order']}, {best['operator']})",
@@ -125,7 +152,26 @@ def run_stats(run):
         "Beat Adam on all 4 tasks": str(sum(_all_better(run, o) for o in robust)),
         "Distinct skeletons in final population": f"{len({code_skeleton(i['code']) for i in pop})}/{len(pop)}",
         "Wall-clock": f"{(max(times) - min(times)) / 60:.0f} min" if len(times) > 1 else "–",
+        "API cost (list price)": _api_cost(run),
     }
+
+
+def _api_cost(run):
+    """Calls, tokens and list-price cost of an API backbone, from the per-call log of api_anthropic.py."""
+    path = os.path.join(run_dir(run), "results", "llm_usage.jsonl")
+    if not os.path.exists(path):
+        return "– (local GPU)"
+    calls = tin = tout = 0
+    usd = 0.0
+    with open(path) as f:
+        for line in f:
+            r = json.loads(line) if line.strip() else {"error": "blank"}
+            if "error" in r:
+                continue
+            pin, pout = API_PRICE[r["model"]]
+            calls, tin, tout = calls + 1, tin + r["input_tokens"], tout + r["output_tokens"]
+            usd += (r["input_tokens"] * pin + r["output_tokens"] * pout) / 1e6
+    return f"${usd:.2f} ({calls} calls, {tin / 1e6:.1f}M input + {tout / 1e6:.1f}M output tokens)"
 
 
 def _seed_population(run):
@@ -159,13 +205,13 @@ def eoh_summary(runs):
     if not stats:
         return None
     keys = list(next(iter(stats.values())))
-    return md_table([""] + list(stats), [[k] + [stats[r][k] for r in stats] for k in keys])
+    return md_table([""] + [run_label(r) for r in stats], [[k] + [stats[r][k] for r in stats] for k in keys])
 
 
 def fig_search_progress(runs):
-    """Best-so-far fitness per run: R1/R2 (training loss, element-wise) and R3/R4 (validation
-    loss, per tensor) are different problems, so they get separate panels. A seeded run
-    starts at its best seed (sample index 0); hand-written baselines are dashed lines."""
+    """Best-so-far fitness of each run next to its twin on the other backbone (LLM dash-dot), one panel
+    per problem: R1, R2 (training loss, element-wise) and R3/R4 (validation loss, per tensor). A seeded
+    run starts at its best seed (sample index 0); hand-written baselines are dashed grey lines."""
     import matplotlib.pyplot as plt
 
     data = {}
@@ -186,20 +232,23 @@ def fig_search_progress(runs):
         data[run] = (x, mean, rob)
     if not data:
         return None
-    panels = [(k, title, [r for r in ("R1", "R2") if r in data]) for k, title in
-              ((1, "R1/R2 setting: mean fitness (R1's objective)"), (2, "R1/R2 setting: robust (R2's objective)"))]
-    panels.append((2, "R3/R4 setting: robust, validation loss", [r for r in ("R3", "R4") if r in data]))
+    panels = [(1, "R1: mean fitness, training loss", ("R1", "R1_haiku")),
+              (2, "R2: robust fitness, training loss", ("R2", "R2_haiku")),
+              (2, "R3/R4: robust fitness, validation loss", ("R3", "R3_haiku", "R4"))]
+    panels = [(k, title, [r for r in rs if r in data]) for k, title, rs in panels]
     panels = [p for p in panels if p[2]]
     plotstyle.apply()
-    fig, axes = plt.subplots(1, len(panels), figsize=(4.4 * len(panels), 3.5), squeeze=False)
+    fig, axes = plt.subplots(1, len(panels), figsize=(4.4 * len(panels), 3.6), squeeze=False)
     for ax, (k, title, rs) in zip(axes[0], panels):
         for run in rs:
             d = data[run]
             y = np.fmin.accumulate(np.where(np.isfinite(d[k]), d[k], np.inf))
-            ax.step(d[0], y, where="post", lw=2, color=plotstyle.color(f"{run}#1"), label=run)
+            color, ls = _style(run, run.endswith("_haiku"))
+            ax.step(d[0], y, where="post", lw=2, color=color, ls=ls,
+                    label=run_label(run) + (" (seeded)" if _seed_population(run) else ""))
             ax.annotate(f"{y[-1]:+.3f}", (d[0][-1], y[-1]), xytext=(3, -10), textcoords="offset points",
                         fontsize=8, color=plotstyle.INK)
-        if rs[0] == "R3":
+        if "R3" in rs:
             base = _load(os.path.join(HERE, "baselines_r3.json")) or {}
             for name in ("shampoo_cosine", "muon_cosine", "adamw_cosine"):
                 if name in base:
@@ -225,7 +274,8 @@ def top_rules(run, k=3):
     parts = []
     for i, ind in enumerate(pop[:k], start=1):
         seed = f" *(seed: {plotstyle.label(seeds[ind['code']])})*" if ind["code"] in seeds else ""
-        parts.append(f"**{run}#{i}** — fitness {ind['objective']:+.4f}{seed}\n\n> {ind.get('algorithm') or ''}\n\n"
+        parts.append(f"**{run_label(run)}#{i}** — fitness {ind['objective']:+.4f}{seed}\n\n"
+                     f"> {ind.get('algorithm') or ''}\n\n"
                      f"```python\n{ind['code'].strip()}\n```")
     return "\n\n".join(parts)
 
@@ -247,6 +297,7 @@ def search_config(run):
 def benchmark_table(data):
     tbl = data["table"]
     tasks = list(next(iter(tbl.values())).keys())
+    raised = data.get("raised", set())
     rows = []
     for name, row in tbl.items():
         cells = []
@@ -257,9 +308,40 @@ def benchmark_table(data):
                 continue
             sp = f"×{c['speedup']:.2f}" if c.get("speedup") else "never"
             div = f", {c['n_diverged']} diverged" if c.get("n_diverged") else ""
-            cells.append(f"{c['rel_mean']:+.3f} ± {c['rel_std']:.3f} ({sp}{div})")
+            mark = " †" if (name, t) in raised else ""
+            cells.append(f"{c['rel_mean']:+.3f} ± {c['rel_std']:.3f} ({sp}{div}){mark}")
         rows.append([plotstyle.label(name)] + cells)
-    return md_table(["optimizer"] + [TASK_LABELS.get(t, t) for t in tasks], rows)
+    note = ("\n\n† The first evaluation of this rule raised on this task (`torch.linalg.eigh` on a NaN or degenerate "
+            "matrix); the value is from the rerun that scores an exception in `step()` as divergence from that step "
+            "on (`scripts/validate_haiku.sh tolerant`)." if raised else "")
+    return md_table(["optimizer"] + [TASK_LABELS.get(t, t) for t in tasks], rows) + note
+
+
+def _raw_name(name):
+    """R3_haiku_1_tolerant -> R3_haiku#1, the evaluation of the same rule without the exception wrapper."""
+    m = re.match(r"^(R\d_haiku)_(\d+)_tolerant$", name)
+    return f"{m.group(1)}#{m.group(2)}" if m else None
+
+
+def _with_llm_rows(data, extra):
+    """Add the LLM backbone's rules from the merged copy in --llm-adir (evaluated against the same Adam
+    reference). A *_tolerant rerun replaces its raw row, and the cells where the raw run raised are kept
+    in data["raised"]; baselines and SLM rules stay as in --adir."""
+    if not extra:
+        return data
+    data = data or dict(table={}, raw=[], metric=extra.get("metric"))
+    raised = data.setdefault("raised", set())
+    rows = {n: r for n, r in extra["table"].items() if plotstyle.is_llm(n)}
+    replaced = {_raw_name(n) for n in rows} - {None}
+    tasks = list(next(iter((data["table"] or rows).values())).keys())
+    for n, r in rows.items():
+        if n in replaced:
+            continue
+        raw = rows.get(_raw_name(n), {})
+        raised |= {(n, t) for t in tasks if raw.get(t, {}).get("error") not in (None, "not run")}
+        data["table"][n] = {t: r.get(t, dict(error="not run")) for t in tasks}
+    data["raw"] += [x for x in extra["raw"] if x["rule"] in rows and x["rule"] in data["table"]]
+    return data
 
 
 def _mean_curve(curves):
@@ -278,38 +360,38 @@ def _smooth(y, w=20):
     return np.convolve(y, k, mode="valid")
 
 
-def fig_loss_curves(data, name, title, featured, baselines):
+def fig_loss_curves(data, name, title, rows, row_names):
+    """One row per comparison (CURVE_ROWS), one column per task: the SLM and LLM rule of a row share each panel."""
     import matplotlib.pyplot as plt
 
     raw = {(r["rule"], r["task"]): r for r in data["raw"] if "curves" in r}
     tasks = list(next(iter(data["table"].values())).keys())
-    ents = [e for e in featured + baselines if any((e, t) in raw for t in tasks)]
     val = data.get("metric") == "val"  # held-out loss every 10 steps instead of per-step minibatch loss
     w, every = (3, 10) if val else (20, 1)
     plotstyle.apply()
-    ncol = min(len(tasks), 3)
-    nrow = int(np.ceil(len(tasks) / ncol))
-    fig, axes = plt.subplots(nrow, ncol, figsize=(3.4 * ncol, 2.6 * nrow + 0.5), squeeze=False)
-    for ax, t in zip(axes.flat, tasks):
-        for e in ents:
-            if (e, t) not in raw:
-                continue
-            y = _smooth(_mean_curve(raw[(e, t)]["curves"]), w)
-            ax.plot((np.arange(len(y)) + w) * every, y, color=plotstyle.color(e), ls=plotstyle.linestyle(e), lw=1.6,
-                    label=plotstyle.label(e))
-        ax.set_yscale("log")
-        ax.set_title(TASK_LABELS.get(t, t), loc="left")
-        ax.set_xlabel("step")
-    for ax in list(axes.flat)[len(tasks):]:
-        ax.axis("off")
-    axes[0][0].set_ylabel(f"{'validation' if val else 'training'} loss (seed mean, smoothed)")
+    fig, axes = plt.subplots(len(rows), len(tasks), figsize=(2.75 * len(tasks), 2.35 * len(rows) + 0.55),
+                             squeeze=False)
+    for i, ents in enumerate(rows):
+        for j, t in enumerate(tasks):
+            ax = axes[i][j]
+            for e in ents:
+                if (e, t) not in raw:
+                    continue
+                y = _smooth(_mean_curve(raw[(e, t)]["curves"]), w)
+                color, ls = _style(e, plotstyle.is_llm(e))
+                ax.plot((np.arange(len(y)) + w) * every, y, color=color, ls=ls, lw=1.6, label=plotstyle.label(e))
+            ax.set_yscale("log")
+            if i == 0:
+                ax.set_title(TASK_LABELS.get(t, t), loc="left", fontsize=8.5)
+            if i == len(rows) - 1:
+                ax.set_xlabel("step")
+        axes[i][0].set_ylabel(f"{row_names[i]}\n{'validation' if val else 'training'} loss")
     legend = {}  # from every panel: a rule may not have been run on the first task
     for ax in axes.flat:
         for h, lab in zip(*ax.get_legend_handles_labels()):
             legend.setdefault(lab, h)
-    handles, labels = list(legend.values()), list(legend)
-    fig.legend(handles, labels, loc="upper center", ncol=len(labels), frameon=False, fontsize=8)
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    fig.legend(list(legend.values()), list(legend), loc="upper center", ncol=len(legend), frameon=False, fontsize=8)
+    fig.tight_layout(rect=(0, 0, 1, 0.93 if len(rows) > 1 else 0.88))
     fig.savefig(os.path.join(FIG_DIR, name), dpi=150)
     plt.close(fig)
     return fig_link(name, title)
@@ -362,7 +444,8 @@ def alignment_table(data, setting="elementwise"):
             else:
                 row += [_f(a["rhoF_P"], ".3f"), _f(a["rhoF"], "+.3f"), _f(a["cos_full"], "+.3f"),
                         _f(a["cos_diag"], "+.3f")]
-                refs[t].append(a)
+                if not plotstyle.is_llm(name):  # the reference directions stay those of the SLM analysis
+                    refs[t].append(a)
             if rotation:
                 rot = v.get("rotation")
                 row.append(_f(rot["penalty"], "+.3f") if rot else "–")
@@ -376,8 +459,8 @@ def alignment_table(data, setting="elementwise"):
                              f"{m['rhoF_full']:.3f}", f"{m['diag_ref']:+.3f}"])
     ref = md_table(["task", "ρ_F(−g) (SGD)", "ρ_F(−g/√diag F)", "ρ_F(−g/diag F) (diag-NGD)", "ρ_F(−F⁻¹g) (NGD)",
                     "cos(diag-NGD, NGD)"], ref_rows)
-    return ("\n\n".join(parts) + "\n\n**Reference directions** (same probe gradient, averaged over all "
-            "trajectories above):\n\n" + ref)
+    return ("\n\n".join(parts) + "\n\n**Reference directions** (same probe gradient, averaged over the "
+            "trajectories of the baselines and SLM rules above):\n\n" + ref)
 
 
 def fig_alignment(data, setting="elementwise"):
@@ -408,8 +491,10 @@ def fig_alignment(data, setting="elementwise"):
         ax.set_ylim(0, 1.02)
     axes[0][0].set_ylabel(ylabel)
     handles, labels = axes[0][0].get_legend_handles_labels()
+    legend_h = 0.28 * int(np.ceil(len(labels) / 4)) + 0.1  # inches above the panels, so the legend clears the titles
+    fig.set_size_inches(3.8 * len(tasks), 2.7 + legend_h)
     fig.legend(handles, labels, loc="upper center", ncol=min(len(labels), 4), frameon=False, fontsize=8)
-    fig.tight_layout(rect=(0, 0, 1, 0.84))
+    fig.tight_layout(rect=(0, 0, 1, 1 - legend_h / (2.7 + legend_h)))
     name = "alignment_rhoF.png" if setting == "elementwise" else f"alignment_rhoF_{setting}.png"
     fig.savefig(os.path.join(FIG_DIR, name), dpi=150)
     plt.close(fig)
@@ -471,8 +556,8 @@ def fig_alpha_plane(alphas):
         evolved = n.startswith("R1") or n == "minimal"
         ax.scatter([s["b"]], [s["alpha"]], s=40, color=plotstyle.SERIES[0] if evolved else plotstyle.OTHER,
                    edgecolor=plotstyle.SURFACE, linewidth=1.2, zorder=3)
-        ax.annotate(plotstyle.label(n), (s["b"], s["alpha"]), xytext=(6, -10), textcoords="offset points",
-                    fontsize=8, color=plotstyle.INK)
+        ax.annotate(plotstyle.label(n).removeprefix("SLM-"), (s["b"], s["alpha"]), xytext=(6, -10),
+                    textcoords="offset points", fontsize=8, color=plotstyle.INK)  # SLM rules only (see main)
     ax.set_xlabel("b  (exponent of |m|)")
     ax.set_ylabel("α  (exponent of diag F)")
     ax.set_title(f"log|Δ| = c + b·log|m| − α·log F_ii  ({TASK_LABELS[t]})", loc="left", fontsize=9)
@@ -542,7 +627,7 @@ def groups_table(runs):
         if not samples:
             continue
         pop_tags = [tag(ind["code"]) for ind in latest_population(run)]
-        cols.append(run)
+        cols.append(run_label(run))
         for g, keys in GROUPS:
             has = [r for r in samples if any(_truthy(r.get(k)) for k in keys)]
             in_pop = sum(any(t.get(k) for k in keys) for t in pop_tags)
@@ -551,7 +636,7 @@ def groups_table(runs):
                            f"{_f(best, '+.3f')}")
     if not cols:
         return None
-    return md_table(["mechanism group"] + [f"{r}: % samples / in final pop / best fitness" for r in cols],
+    return md_table(["mechanism group (% samples / in final pop / best fitness)"] + cols,
                     [[g] + rows[g] for g, _ in GROUPS])
 
 
@@ -646,10 +731,25 @@ def fill(report_path, blocks):
         f.write(text)
 
 
+def _with_llm(base, extra):
+    """base plus the LLM rules of extra; the anchors that extra re-measured (SLM rules, baselines) are
+    ignored, and so is a *_tolerant rerun whose raw twin is there."""
+    out = dict(base or {})
+    for n, v in (extra or {}).items():
+        if plotstyle.is_llm(n) and _raw_name(n) not in (extra or {}):
+            out.setdefault(n, v)
+    return out or None
+
+
+def _slm_only(d):
+    return {n: v for n, v in (d or {}).items() if not plotstyle.is_llm(n)}
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runs", nargs="+", default=["R1", "R2", "R3", "R4"])
+    ap.add_argument("--runs", nargs="+", default=RUNS)
     ap.add_argument("--adir", default=os.path.join(HERE, "analysis_out"))
+    ap.add_argument("--llm-adir", default=os.path.join(HERE, "analysis_out", "haiku"))
     ap.add_argument("--report", default=os.path.join(REPORT_DIR, "REPORT.md"))
     args = ap.parse_args()
     os.makedirs(FIG_DIR, exist_ok=True)
@@ -658,7 +758,8 @@ def main():
 
     blocks = {"eoh_summary": eoh_summary(runs), "search_progress": fig_search_progress(runs)}
     for run in runs:
-        blocks[f"search_config_{run}"] = search_config(run)
+        if not run.endswith("_haiku"):  # the LLM twin got the same task description and template
+            blocks[f"search_config_{run}"] = search_config(run)
         blocks[f"top_rules_{run}"] = top_rules(run)
         motifs_md = os.path.join(run_dir(run), "analysis", "timeline.md")
         if os.path.exists(motifs_md):
@@ -666,29 +767,31 @@ def main():
                 blocks[f"timeline_{run}"] = f.read().split("\n", 1)[1].strip()
 
     for suite in ("search", "transfer", "r3", "r3_transfer"):
-        data = _eval_tables(args.adir, suite)
+        data = _with_llm_rows(_eval_tables(args.adir, suite), _eval_tables(args.llm_adir, suite))
         blocks[f"bench_{suite}"] = benchmark_table(data) if data else None
-        setting = SETTING_RUNS[suite]
-        featured = [f"{r}#1" for r in runs if r in setting] + [
-            n for n in (data or {}).get("table", {}) if n.endswith("_polished") and n.startswith(setting)]
-        blocks[f"curves_{suite}"] = (fig_loss_curves(data, f"loss_{suite}.png", suite, featured,
-                                                     CURVE_BASELINES[suite]) if data else None)
+        rows, row_names = CURVE_ROWS[CURVE_SETTING[suite]]
+        blocks[f"curves_{suite}"] = fig_loss_curves(data, f"loss_{suite}.png", suite, rows, row_names) if data else None
 
-    align = _merged(args.adir, "ngd_alignment*.json", depth=3)
+    # the NGD tables add the LLM rules; the NGD figures stay those of the SLM analysis
+    align = _with_llm(_merged(args.adir, "ngd_alignment*.json", depth=3),
+                      _merged(args.llm_adir, "ngd_alignment*.json", depth=3))
     for setting, key in (("elementwise", "alignment"), ("tensor", "alignment_r3")):
         blocks[key] = alignment_table(align, setting) if align else None
-        blocks[f"{key}_fig"] = fig_alignment(align, setting) if align else None
+        blocks[f"{key}_fig"] = fig_alignment(_slm_only(align), setting) if align else None
 
-    alphas = {t: d for t in ("softmax_illcond", "mlp_fmnist") if (d := _merged(args.adir, f"alpha_{t}*.json"))}
-    inv = _merged(args.adir, "invariance*.json")
+    alphas = {t: _with_llm(_merged(args.adir, f"alpha_{t}*.json"), _merged(args.llm_adir, f"alpha_{t}*.json"))
+              for t in ("softmax_illcond", "mlp_fmnist")}
+    alphas = {t: d for t, d in alphas.items() if d}
+    inv = _with_llm(_merged(args.adir, "invariance*.json"), _merged(args.llm_adir, "invariance*.json"))
     blocks["alpha"] = alpha_table(alphas, inv) if (alphas or inv) else None
-    blocks["alpha_fig"] = fig_alpha_plane(alphas)
+    blocks["alpha_fig"] = fig_alpha_plane({t: _slm_only(d) for t, d in alphas.items()})
 
     pop = _load(A("population_corr.json"))
     blocks["population"] = population_table(pop) if pop else None
     blocks["ablation"] = ablation_block(args.adir, "R1")
     blocks["polish"] = polish_block(args.adir)
-    cost = _load(A("step_cost.json"))
+    # one measurement of every rule of both backbones in a row, when validate_haiku.sh made one
+    cost = _load(os.path.join(args.llm_adir, "step_cost.json")) or _load(A("step_cost.json"))
     blocks["step_cost"] = step_cost_table(cost) if cost else None
     blocks["groups"] = groups_table(runs)
 
